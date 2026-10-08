@@ -1,0 +1,224 @@
+<!doctype html>
+<html lang="th"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>AI Office</title>
+<style>
+:root{--bg:#070d18;--panel:#0b1626;--line:#1e6f8f;--neon:#22d3ee;--txt:#cfe8f3;--dim:#5b7a8c;
+--boss:#f5c542;--dev:#4aa3ff;--qa:#4ade80;--bad:#f87171}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--txt);font:13px/1.45 "Courier New",monospace;height:100vh;display:flex;flex-direction:column;overflow:hidden}
+.box{background:var(--panel);border:2px solid var(--line);box-shadow:0 0 10px #22d3ee22,inset 0 0 14px #22d3ee0d}
+.ttl{color:var(--neon);font-weight:bold;letter-spacing:1px;font-size:12px}
+header{display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;padding:8px 14px;margin:6px 6px 0}
+header h1{margin:0;font-size:20px;color:var(--neon);letter-spacing:3px;text-shadow:0 0 8px var(--neon)}
+header h1 small{font-size:11px;color:var(--dim)}
+#flow{display:flex;gap:4px;flex-wrap:wrap;align-items:center}
+#flow span{font-size:10px;padding:1px 6px;border:1px solid var(--line);color:var(--dim)}
+#flow span.on{background:var(--neon);color:#001;box-shadow:0 0 8px var(--neon)}
+#flow span.ok{color:#4ade80;border-color:#4ade80}
+#clock{font-size:16px;color:var(--neon)}
+#snd{background:none;border:1px solid var(--line);color:var(--neon);cursor:pointer;font:12px monospace;padding:1px 6px}
+#wsbar{display:flex;align-items:center;gap:10px;margin:6px 6px 0;padding:5px 12px;font-size:12px}
+#wspath{flex:1;min-width:0;color:var(--dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#wspath.set{color:#4ade80}
+#wsbtn{background:var(--neon);color:#001;border:0;font:bold 12px monospace;padding:3px 10px;cursor:pointer}
+main{flex:1;min-height:0;display:grid;grid-template-columns:200px 1fr 1.1fr;gap:6px;padding:6px}
+.col{display:flex;flex-direction:column;gap:6px;min-height:0}
+.box.p{padding:8px}
+.mem{display:flex;align-items:center;gap:8px;padding:5px 0;border-bottom:1px dashed #1e6f8f55}
+.av{width:22px;height:22px;background:var(--c);border:2px solid #000;box-shadow:0 0 6px var(--c)}
+.mem .n{flex:1;font-weight:bold}
+.st{font-size:10px;color:var(--dim)}
+.on .st{color:var(--c)}.done .st{color:#4ade80}
+.met div{display:flex;justify-content:space-between}
+.met b{color:var(--neon)}
+#steps{display:flex;align-items:flex-end;gap:3px;height:44px;margin-top:6px;border-bottom:1px solid var(--line)}
+#steps i{flex:1;min-width:4px;background:var(--c);opacity:.85}
+#hist{overflow:auto;flex:1;min-height:0}
+#hist div{font-size:11px;padding:3px 0;border-bottom:1px dashed #1e6f8f33;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.room{flex:1;min-height:0;display:flex;flex-direction:column;padding:6px 8px}
+.room h2{margin:0 0 4px;display:flex;justify-content:space-between;align-items:center}
+.dot{width:10px;height:10px;border-radius:50%;background:#334}
+.on .dot{background:var(--c);box-shadow:0 0 8px var(--c);animation:pulse 1s infinite}
+.done .dot{background:#4ade80}
+@keyframes pulse{50%{opacity:.35}}
+.scene{flex:1;min-height:0;display:flex;gap:8px;align-items:stretch}
+canvas{image-rendering:pixelated;width:48%;height:100%;min-height:70px;object-fit:contain;background:#050b14;border:2px solid #223c52;flex:none}
+.on canvas{box-shadow:0 0 14px var(--c)}
+.mon{flex:1;min-width:0;background:#02080f;border:3px solid #3a566a;position:relative;overflow:hidden;padding:4px;color:var(--c);font-size:10px;line-height:12px;white-space:pre-wrap;word-break:break-all}
+.mon:after{content:"";position:absolute;inset:0;background:repeating-linear-gradient(#0000 0 2px,#0003 2px 3px);pointer-events:none}
+.mon .t{position:absolute;left:4px;right:4px;bottom:4px}
+.mon .idle{color:var(--dim)}
+#logbox{flex:1;min-height:0;display:flex;flex-direction:column;padding:8px}
+#log{flex:1;overflow:auto;padding-right:4px}
+.msg{border-left:4px solid var(--c);background:#0f2236;padding:6px 10px;margin:6px 0;white-space:pre-wrap;word-break:break-word}
+.msg b{color:var(--c)}.tag{margin-left:8px;font-size:12px}
+.pass{color:#4ade80}.fail{color:var(--bad)}
+.sep{text-align:center;color:var(--dim);margin:8px 0;font-size:12px}
+pre{position:relative;background:#02080f;padding:8px;margin:6px 0;overflow-x:auto;border:1px solid #1e6f8f55}
+pre button{position:absolute;top:4px;right:4px;font:11px monospace;cursor:pointer;background:#0b1626;color:var(--neon);border:1px solid var(--line)}
+form{display:flex;gap:6px;margin-top:8px}
+input{flex:1;min-width:0;padding:8px;font:inherit;background:#02080f;color:var(--txt);border:2px solid var(--line)}
+form button{padding:8px 16px;font:bold 13px monospace;background:var(--neon);color:#001;border:0;cursor:pointer}
+form button:disabled{opacity:.4}
+footer{display:flex;gap:18px;align-items:center;padding:6px 14px;margin:0 6px 6px;font-size:12px;flex-wrap:wrap}
+footer span{color:var(--dim)}footer b{color:var(--neon)}
+.seg{display:inline-flex;gap:3px;vertical-align:middle}
+.seg i{width:16px;height:8px;background:#1b3347}.seg i.f{background:var(--neon);box-shadow:0 0 6px var(--neon)}
+.pkt{position:fixed;z-index:9;font-size:22px;pointer-events:none;filter:drop-shadow(0 0 6px var(--neon))}
+@media(max-width:900px){
+ body{height:auto;overflow:auto}main{grid-template-columns:1fr}
+ .room{min-height:170px}#logbox{min-height:420px}#team{display:none}}
+</style></head><body>
+<header class="box"><h1>AI OFFICE <small>v1.0</small></h1><div id="flow"></div>
+ <div><button id="snd" title="เสียง">🔊</button> <span id="clock">--:--</span></div></header>
+<div class="box" id="wsbar"><span class="ttl">📁 โฟลเดอร์งาน</span><span id="wspath">ยังไม่ได้เลือก (โค้ดแสดงอย่างเดียว ไม่เขียนไฟล์)</span><button id="wsbtn">เลือกโฟลเดอร์</button></div>
+<main>
+ <div class="col" id="team">
+  <div class="box p"><div class="ttl">TEAM STATUS</div><div id="mem"></div></div>
+  <div class="box p met"><div class="ttl">COMPANY METRICS</div>
+   <div><span>งานทั้งหมด</span><b id="m-run">0</b></div>
+   <div><span>ผ่าน</span><b id="m-pass">0</b></div>
+   <div><span>ตีกลับ</span><b id="m-fail">0</b></div>
+   <div><span>โค้ดที่รัน</span><b id="m-code">0</b></div>
+   <div class="ttl" style="margin-top:6px;font-size:10px">เวลาแต่ละขั้น</div><div id="steps"></div></div>
+  <div class="box p" style="flex:1;min-height:0;display:flex;flex-direction:column"><div class="ttl">HISTORY</div><div id="hist"></div></div>
+ </div>
+ <div class="col" id="rooms"></div>
+ <div class="col"><div class="box" id="logbox"><div class="ttl">ACTIVITY LOG</div><div id="log"></div>
+  <form><input id="task" placeholder="สั่งงานหัวหน้า เช่น เขียนฟังก์ชันบวกเลข" required><button id="go">RUN</button></form></div></div>
+</main>
+<footer class="box">
+ <span>SYSTEM <b id="sys">READY</b></span>
+ <span>AI AGENTS <b id="ag">0/3</b></span>
+ <span>ROUND <span class="seg" id="seg"><i></i><i></i><i></i></span></span>
+ <span>เวลา <b id="el">0s</b></span>
+</footer>
+<script>
+const $=id=>document.getElementById(id);
+const R={BOSS:{th:"หัวหน้า",room:"1. COMMAND CENTER",hex:"#f5c542",hair:"#7a4b1e"},
+         DEV:{th:"โปรแกรมเมอร์",room:"2. BOT FACTORY",hex:"#4aa3ff",hair:"#222"},
+         QA:{th:"ตรวจงาน",room:"3. REVIEW ROOM",hex:"#4ade80",hair:"#b5532b"}};
+const ROLES=Object.keys(R),col=r=>`var(--${r.toLowerCase()})`;
+const safe=(f,d)=>{try{return f()}catch{return d}};
+
+/* ---------- layout ---------- */
+$("mem").innerHTML=ROLES.map(r=>`<div class="mem" id="mem-${r}" style="--c:${col(r)}"><i class="av"></i><span class="n">${R[r].th}</span><span class="st">[IDLE]</span></div>`).join("");
+$("rooms").innerHTML=ROLES.map(r=>`<div class="box room" id="${r}" style="--c:${col(r)}"><h2><span class="ttl">${R[r].room}</span><i class="dot"></i></h2>
+<div class="scene"><canvas width="96" height="64"></canvas><div class="mon"><div class="t idle">รอรับงาน…</div></div></div></div>`).join("");
+const STAGES=["BRIEF","PLAN","BUILD","REVIEW","REPORT"];
+$("flow").innerHTML=STAGES.map(s=>`<span>${s}</span>`).join("→");
+const stage=i=>$("flow").querySelectorAll("span").forEach((s,j)=>{s.className=j<i?"ok":j==i?"on":""});
+setInterval(()=>$("clock").textContent="TIME: "+new Date().toTimeString().slice(0,8),1000);
+
+/* ---------- pixel art ---------- */
+const S={};ROLES.forEach(r=>S[r]={on:false,done:false,wave:0,ctx:$(r).querySelector("canvas").getContext("2d")});
+function px(c,x,y,w,h,f){c.fillStyle=f;c.fillRect(x,y,w,h)}
+function draw(r,t){
+ const s=S[r],c=s.ctx,k=R[r].hex,fr=Math.floor(t/160)%2;
+ px(c,0,0,96,64,"#101b30");                                   // wall
+ for(let x=0;x<96;x+=8)px(c,x,0,1,38,"#15233c");
+ px(c,8,6,16,14,"#1b3a63");px(c,9,7,14,12,"#2b6cb0");px(c,15,7,2,12,"#101b30");px(c,9,12,14,2,"#101b30"); // window
+ for(let y=40;y<64;y+=8)for(let x=0;x<96;x+=8)px(c,x,y,8,8,((x+y)/8)%2?"#27304d":"#2e3858"); // floor
+ px(c,30,34,60,4,"#a0662f");px(c,30,38,60,2,"#6b4219");px(c,32,40,3,10,"#6b4219");px(c,85,40,3,10,"#6b4219"); // desk
+ const g=s.on?k:"#2a3b4d";                                     // monitor
+ px(c,58,14,28,19,"#0a0f18");px(c,60,16,24,15,"#02080f");px(c,69,33,6,2,"#3a566a");
+ for(let i=0;i<5;i++){const w=s.on?4+((i*7+Math.floor(t/120))%14):6;px(c,62,18+i*3,w,1,g)}
+ if(s.on)px(c,60,16,24,15,k+"22");
+ // character (sitting)
+ const sk="#ffcc99";
+ px(c,43,13,10,9,sk);px(c,43,11,10,4,R[r].hair);px(c,45,17,2,2,"#000");px(c,49,17,2,2,"#000");
+ if(r=="DEV"){px(c,41,14,2,7,"#222");px(c,53,14,2,7,"#222");px(c,43,10,10,2,"#222")}      // headphones
+ if(r=="BOSS"){px(c,45,8,6,3,"#f5c542");px(c,45,7,1,1,"#f5c542");px(c,47,6,2,2,"#f5c542");px(c,50,7,1,1,"#f5c542")} // crown
+ if(r=="QA"){px(c,62,38,5,5,"#9ad7ff");px(c,63,39,3,3,"#101b30");px(c,66,43,1,4,"#aaa")} // magnifier on desk
+ px(c,41,22,14,13,k);px(c,40,35,16,3,"#333");px(c,43,38,4,10,"#333");px(c,50,38,4,10,"#333"); // body+legs
+ if(r=="BOSS"){px(c,47,22,2,9,"#c0392b")}                                              // tie
+ const dy=s.on?fr*2:0;                                         // hands typing
+ if(s.wave>0&&fr){px(c,55,10,3,12,sk);px(c,55,22,3,3,k)}else px(c,55,31+dy,5,4,sk);
+ px(c,38,31+(s.on?2-dy:0),5,4,sk);
+ if(s.done&&!s.on){px(c,76,4,2,2,"#4ade80");px(c,78,6,2,2,"#4ade80");px(c,80,4,2,2,"#4ade80");px(c,82,2,2,2,"#4ade80")} // check mark
+ px(c,10,46,8,6,"#8b4a2b");px(c,9,38,4,8,"#2f9e44");px(c,13,36,4,10,"#37b24d");px(c,17,40,4,6,"#2f9e44"); // plant
+ const wag=Math.floor(t/300)%2;px(c,70,54,10,5,"#e08a3c");px(c,78,50,5,5,"#e08a3c");px(c,78,49,1,2,"#e08a3c");px(c,82,49,1,2,"#e08a3c");px(c,66,53-wag,4,2,"#e08a3c"); // cat
+}
+let last=0;(function loop(t){if(t-last>90){last=t;ROLES.forEach(r=>{if(S[r].wave>0&&t%1000<90)S[r].wave--;draw(r,t)})}requestAnimationFrame(loop)})(0);
+
+/* ---------- sound + handoff packet ---------- */
+let AC,muted=safe(()=>localStorage.mute=="1",false);
+const refreshSnd=()=>$("snd").textContent=muted?"🔇":"🔊";refreshSnd();
+$("snd").onclick=()=>{muted=!muted;safe(()=>localStorage.mute=muted?"1":"0");refreshSnd()};
+function beep(seq){if(muted)return;safe(()=>{AC=AC||new AudioContext();let t=AC.currentTime;
+ seq.forEach(([f,d,type])=>{const o=AC.createOscillator(),g=AC.createGain();o.type=type||"square";o.frequency.value=f;g.gain.value=.04;
+  o.connect(g);g.connect(AC.destination);o.start(t);g.gain.exponentialRampToValueAtTime(.0001,t+d);o.stop(t+d);t+=d})})}
+function fly(a,b){
+ const A=$(a).getBoundingClientRect(),B=$(b).getBoundingClientRect(),p=document.createElement("div");
+ p.className="pkt";p.textContent="📄";document.body.append(p);
+ const f=r=>[r.left+r.width/2-11,r.top+r.height/2-11];
+ const [x1,y1]=f(A),[x2,y2]=f(B);
+ p.animate([{transform:`translate(${x1}px,${y1}px) scale(1)`},{transform:`translate(${(x1+x2)/2+40}px,${(y1+y2)/2}px) scale(1.5)`},{transform:`translate(${x2}px,${y2}px) scale(1)`}],{duration:900,easing:"ease-in-out"}).onfinish=()=>p.remove();
+}
+
+/* ---------- workspace ---------- */
+async function setWs(path){
+ const r=await fetch("/workspace",{method:"POST",body:JSON.stringify({path})}),j=await r.json();
+ if(j.error)return alert(j.error);showWs(j)}
+function showWs(j){const e=$("wspath");e.textContent=j.path?`${j.path}  (${j.files.length} ไฟล์)`:"ยังไม่ได้เลือก (โค้ดแสดงอย่างเดียว ไม่เขียนไฟล์)";e.className=j.path?"set":""}
+fetch("/workspace").then(r=>r.json()).then(showWs).catch(()=>{});
+$("wsbtn").onclick=async()=>{ // desktop app: native folder dialog; browser: ask for a path
+ const p=window.pywebview?.api?await window.pywebview.api.pick_folder():prompt("พิมพ์พาธโฟลเดอร์งาน เช่น C:\\Users\\me\\myproject");
+ if(p)setWs(p)};
+
+/* ---------- state ---------- */
+const M={run:0,pass:0,fail:0,code:0},setM=()=>Object.keys(M).forEach(k=>$("m-"+k).textContent=M[k]);
+const setSt=(r,s)=>{const d=$(r),m=$("mem-"+r);S[r].on=s=="on";S[r].done=s=="done";
+ d.classList.toggle("on",s=="on");d.classList.toggle("done",s=="done");
+ m.classList.toggle("on",s=="on");m.classList.toggle("done",s=="done");m.querySelector(".st").textContent=s=="on"?"[WORKING]":s=="done"?"[DONE]":"[IDLE]";
+ $("ag").textContent=ROLES.filter(x=>S[x].on).length+"/3"};
+const esc=s=>s.replace(/[&<>]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));
+function render(el,text){
+ el.innerHTML=text.split("```").map((p,i)=>{
+  if(i%2==0) return esc(p);
+  return `<pre><button>COPY</button><code>${esc(p.replace(/^[^\n]*\n/,""))}</code></pre>`}).join("");
+ el.querySelectorAll("pre button").forEach(b=>b.onclick=()=>{navigator.clipboard.writeText(b.nextSibling.textContent);b.textContent="OK";setTimeout(()=>b.textContent="COPY",900)});
+}
+const hist=()=>safe(()=>JSON.parse(localStorage.hist||"[]"),[]);
+function showHist(){$("hist").innerHTML=hist().map(h=>`<div class="${h.ok?"pass":"fail"}">${h.ok?"✔":"✘"} ${h.s}s · ${esc(h.t)}</div>`).join("")||'<div style="color:var(--dim)">ยังไม่มีงาน</div>'}
+showHist();
+let cur,curText,t0,timer,lastRole,bossRuns=0,stepT=0,steps=[],taskTxt="";
+const showSteps=()=>{const mx=Math.max(...steps.map(s=>s.d),1);$("steps").innerHTML=steps.map(s=>`<i title="${s.r} ${s.d.toFixed(0)}s" style="--c:${col(s.r)};height:${Math.max(8,s.d/mx*100)}%"></i>`).join("")};
+function newMsg(role){
+ const d=document.createElement("div");d.className="msg";d.style.setProperty("--c",col(role));
+ d.innerHTML=`<b>${role}</b><span class="tag"></span><div class="t"></div>`;$("log").append(d);cur=d;curText="";
+}
+function handle(e){
+ const log=$("log");
+ if(e.error){log.insertAdjacentHTML("beforeend",`<div class="msg" style="--c:var(--bad)"><span class="fail">⚠ ${esc(e.error)}</span><br>เช็กว่า Ollama รันอยู่ และชื่อโมเดลใน roles.json ถูกต้อง</div>`);$("sys").textContent="ERROR";return}
+ if(e.files)fetch("/workspace").then(r=>r.json()).then(showWs);
+ if(e.note){if(/ผลรันโค้ด/.test(e.note)){M.code++;setM()}log.insertAdjacentHTML("beforeend",`<div class="sep">⚙ ${esc(e.note)}</div>`);return}
+ if(e.round){$("seg").querySelectorAll("i").forEach((s,i)=>s.classList.toggle("f",i<e.round));log.insertAdjacentHTML("beforeend",`<div class="sep">── รอบที่ ${e.round} ──</div>`);return}
+ if("done" in e){const s=Math.round((Date.now()-t0)/1000);const h=hist();h.unshift({ok:e.done,s,t:taskTxt.slice(0,40)});safe(()=>localStorage.hist=JSON.stringify(h.slice(0,8)));showHist();return}
+ const mon=$(e.role).querySelector(".t");
+ if(e.status=="working"){
+  if(lastRole&&lastRole!=e.role)fly(lastRole,e.role);lastRole=e.role;beep([[440,.07]]);stepT=Date.now();
+  stage(e.role=="BOSS"?(bossRuns++?4:1):e.role=="DEV"?2:3);setSt(e.role,"on");newMsg(e.role);mon.className="t";mon.textContent="…"}
+ if(e.token){curText+=e.token;render(cur.querySelector(".t"),curText);mon.textContent=curText.slice(-260)}
+ if(e.status=="done"){setSt(e.role,"done");steps.push({r:e.role,d:(Date.now()-stepT)/1000});showSteps();
+  if(e.role=="QA"){const v=[...curText.matchAll(/VERDICT:\s*\**\s*(PASS|FAIL)/gi)].pop();const ok=v?v[1].toUpperCase()=="PASS":/^\s*PASS/i.test(curText);
+   cur.querySelector(".tag").innerHTML=ok?'<span class="pass">✔ PASS</span>':'<span class="fail">✘ FAIL</span>';ok?M.pass++:M.fail++;setM();
+   if(ok)beep([[523,.09],[659,.09],[784,.16]]);else{beep([[160,.25,"sawtooth"]]);S.DEV.wave=3}}}
+ log.scrollTop=log.scrollHeight;
+}
+document.querySelector("form").onsubmit=async ev=>{
+ ev.preventDefault();$("go").disabled=true;$("log").innerHTML="";M.run++;setM();bossRuns=0;stage(-1);lastRole=null;steps=[];showSteps();taskTxt=$("task").value;
+ ROLES.forEach(r=>{setSt(r,"idle");$(r).querySelector(".t").className="t idle";$(r).querySelector(".t").textContent="รอรับงาน…"});
+ $("seg").querySelectorAll("i").forEach(s=>s.classList.remove("f"));$("sys").textContent="RUNNING";
+ t0=Date.now();clearInterval(timer);timer=setInterval(()=>$("el").textContent=Math.round((Date.now()-t0)/1000)+"s",500);
+ try{
+  const r=await fetch("/",{method:"POST",body:JSON.stringify({task:$("task").value})});
+  const rd=r.body.getReader(),dec=new TextDecoder();let buf="";
+  for(;;){const {done,value}=await rd.read();if(done)break;
+   buf+=dec.decode(value,{stream:true});const lines=buf.split("\n");buf=lines.pop();
+   lines.filter(Boolean).forEach(l=>handle(JSON.parse(l)))}
+  if($("sys").textContent!="ERROR")$("sys").textContent="OPTIMAL";
+ }catch(err){handle({error:err.message})}
+ clearInterval(timer);stage(5);ROLES.forEach(r=>{S[r].on=false;$(r).classList.remove("on")});$("ag").textContent="0/3";$("go").disabled=false;
+};
+</script></body></html>

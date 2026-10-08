@@ -16,7 +16,6 @@ header h1 small{font-size:11px;color:var(--dim)}
 #flow span.on{background:var(--neon);color:#001;box-shadow:0 0 8px var(--neon)}
 #flow span.ok{color:#4ade80;border-color:#4ade80}
 #clock{font-size:16px;color:var(--neon)}
-#snd{background:none;border:1px solid var(--line);color:var(--neon);cursor:pointer;font:12px monospace;padding:1px 6px}
 #wsbar{display:flex;align-items:center;gap:10px;margin:6px 6px 0;padding:5px 12px;font-size:12px}
 #wspath{flex:1;min-width:0;color:var(--dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 #wspath.set{color:#4ade80}
@@ -64,13 +63,12 @@ footer{display:flex;gap:18px;align-items:center;padding:6px 14px;margin:0 6px 6p
 footer span{color:var(--dim)}footer b{color:var(--neon)}
 .seg{display:inline-flex;gap:3px;vertical-align:middle}
 .seg i{width:16px;height:8px;background:#1b3347}.seg i.f{background:var(--neon);box-shadow:0 0 6px var(--neon)}
-.pkt{position:fixed;z-index:9;font-size:22px;pointer-events:none;filter:drop-shadow(0 0 6px var(--neon))}
 @media(max-width:900px){
  body{height:auto;overflow:auto}main{grid-template-columns:1fr}
  .room{min-height:170px}#logbox{min-height:420px}#team{display:none}}
 </style></head><body>
 <header class="box"><h1>AI OFFICE <small>v1.0</small></h1><div id="flow"></div>
- <div><button id="snd" title="เสียง">🔊</button> <span id="clock">--:--</span></div></header>
+ <span id="clock">--:--</span></header>
 <div class="box" id="wsbar"><span class="ttl">📁 โฟลเดอร์งาน</span><span id="wspath">ยังไม่ได้เลือก (โค้ดแสดงอย่างเดียว ไม่เขียนไฟล์)</span><button id="wsbtn">เลือกโฟลเดอร์</button></div>
 <main>
  <div class="col" id="team">
@@ -127,11 +125,7 @@ function draw(r,t){
  // character (sitting)
  const sk="#ffcc99";
  px(c,43,13,10,9,sk);px(c,43,11,10,4,R[r].hair);px(c,45,17,2,2,"#000");px(c,49,17,2,2,"#000");
- if(r=="DEV"){px(c,41,14,2,7,"#222");px(c,53,14,2,7,"#222");px(c,43,10,10,2,"#222")}      // headphones
- if(r=="BOSS"){px(c,45,8,6,3,"#f5c542");px(c,45,7,1,1,"#f5c542");px(c,47,6,2,2,"#f5c542");px(c,50,7,1,1,"#f5c542")} // crown
- if(r=="QA"){px(c,62,38,5,5,"#9ad7ff");px(c,63,39,3,3,"#101b30");px(c,66,43,1,4,"#aaa")} // magnifier on desk
  px(c,41,22,14,13,k);px(c,40,35,16,3,"#333");px(c,43,38,4,10,"#333");px(c,50,38,4,10,"#333"); // body+legs
- if(r=="BOSS"){px(c,47,22,2,9,"#c0392b")}                                              // tie
  const dy=s.on?fr*2:0;                                         // hands typing
  if(s.wave>0&&fr){px(c,55,10,3,12,sk);px(c,55,22,3,3,k)}else px(c,55,31+dy,5,4,sk);
  px(c,38,31+(s.on?2-dy:0),5,4,sk);
@@ -140,21 +134,6 @@ function draw(r,t){
  const wag=Math.floor(t/300)%2;px(c,70,54,10,5,"#e08a3c");px(c,78,50,5,5,"#e08a3c");px(c,78,49,1,2,"#e08a3c");px(c,82,49,1,2,"#e08a3c");px(c,66,53-wag,4,2,"#e08a3c"); // cat
 }
 let last=0;(function loop(t){if(t-last>90){last=t;ROLES.forEach(r=>{if(S[r].wave>0&&t%1000<90)S[r].wave--;draw(r,t)})}requestAnimationFrame(loop)})(0);
-
-/* ---------- sound + handoff packet ---------- */
-let AC,muted=safe(()=>localStorage.mute=="1",false);
-const refreshSnd=()=>$("snd").textContent=muted?"🔇":"🔊";refreshSnd();
-$("snd").onclick=()=>{muted=!muted;safe(()=>localStorage.mute=muted?"1":"0");refreshSnd()};
-function beep(seq){if(muted)return;safe(()=>{AC=AC||new AudioContext();let t=AC.currentTime;
- seq.forEach(([f,d,type])=>{const o=AC.createOscillator(),g=AC.createGain();o.type=type||"square";o.frequency.value=f;g.gain.value=.04;
-  o.connect(g);g.connect(AC.destination);o.start(t);g.gain.exponentialRampToValueAtTime(.0001,t+d);o.stop(t+d);t+=d})})}
-function fly(a,b){
- const A=$(a).getBoundingClientRect(),B=$(b).getBoundingClientRect(),p=document.createElement("div");
- p.className="pkt";p.textContent="📄";document.body.append(p);
- const f=r=>[r.left+r.width/2-11,r.top+r.height/2-11];
- const [x1,y1]=f(A),[x2,y2]=f(B);
- p.animate([{transform:`translate(${x1}px,${y1}px) scale(1)`},{transform:`translate(${(x1+x2)/2+40}px,${(y1+y2)/2}px) scale(1.5)`},{transform:`translate(${x2}px,${y2}px) scale(1)`}],{duration:900,easing:"ease-in-out"}).onfinish=()=>p.remove();
-}
 
 /* ---------- workspace ---------- */
 async function setWs(path){
@@ -182,7 +161,7 @@ function render(el,text){
 const hist=()=>safe(()=>JSON.parse(localStorage.hist||"[]"),[]);
 function showHist(){$("hist").innerHTML=hist().map(h=>`<div class="${h.ok?"pass":"fail"}">${h.ok?"✔":"✘"} ${h.s}s · ${esc(h.t)}</div>`).join("")||'<div style="color:var(--dim)">ยังไม่มีงาน</div>'}
 showHist();
-let cur,curText,t0,timer,lastRole,bossRuns=0,stepT=0,steps=[],taskTxt="";
+let cur,curText,t0,timer,bossRuns=0,stepT=0,steps=[],taskTxt="";
 const showSteps=()=>{const mx=Math.max(...steps.map(s=>s.d),1);$("steps").innerHTML=steps.map(s=>`<i title="${s.r} ${s.d.toFixed(0)}s" style="--c:${col(s.r)};height:${Math.max(8,s.d/mx*100)}%"></i>`).join("")};
 function newMsg(role){
  const d=document.createElement("div");d.className="msg";d.style.setProperty("--c",col(role));
@@ -197,17 +176,17 @@ function handle(e){
  if("done" in e){const s=Math.round((Date.now()-t0)/1000);const h=hist();h.unshift({ok:e.done,s,t:taskTxt.slice(0,40)});safe(()=>localStorage.hist=JSON.stringify(h.slice(0,8)));showHist();return}
  const mon=$(e.role).querySelector(".t");
  if(e.status=="working"){
-  if(lastRole&&lastRole!=e.role)fly(lastRole,e.role);lastRole=e.role;beep([[440,.07]]);stepT=Date.now();
+  stepT=Date.now();
   stage(e.role=="BOSS"?(bossRuns++?4:1):e.role=="DEV"?2:3);setSt(e.role,"on");newMsg(e.role);mon.className="t";mon.textContent="…"}
  if(e.token){curText+=e.token;render(cur.querySelector(".t"),curText);mon.textContent=curText.slice(-260)}
  if(e.status=="done"){setSt(e.role,"done");steps.push({r:e.role,d:(Date.now()-stepT)/1000});showSteps();
   if(e.role=="QA"){const v=[...curText.matchAll(/VERDICT:\s*\**\s*(PASS|FAIL)/gi)].pop();const ok=v?v[1].toUpperCase()=="PASS":/^\s*PASS/i.test(curText);
    cur.querySelector(".tag").innerHTML=ok?'<span class="pass">✔ PASS</span>':'<span class="fail">✘ FAIL</span>';ok?M.pass++:M.fail++;setM();
-   if(ok)beep([[523,.09],[659,.09],[784,.16]]);else{beep([[160,.25,"sawtooth"]]);S.DEV.wave=3}}}
+   if(!ok)S.DEV.wave=3}}
  log.scrollTop=log.scrollHeight;
 }
 document.querySelector("form").onsubmit=async ev=>{
- ev.preventDefault();$("go").disabled=true;$("log").innerHTML="";M.run++;setM();bossRuns=0;stage(-1);lastRole=null;steps=[];showSteps();taskTxt=$("task").value;
+ ev.preventDefault();$("go").disabled=true;$("log").innerHTML="";M.run++;setM();bossRuns=0;stage(-1);steps=[];showSteps();taskTxt=$("task").value;
  ROLES.forEach(r=>{setSt(r,"idle");$(r).querySelector(".t").className="t idle";$(r).querySelector(".t").textContent="รอรับงาน…"});
  $("seg").querySelectorAll("i").forEach(s=>s.classList.remove("f"));$("sys").textContent="RUNNING";
  t0=Date.now();clearInterval(timer);timer=setInterval(()=>$("el").textContent=Math.round((Date.now()-t0)/1000)+"s",500);

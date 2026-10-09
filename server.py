@@ -4,7 +4,7 @@ import difflib, hashlib, json, os, re, shutil, subprocess, sys, tempfile, thread
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from edits import apply_ops, commit, diff_for, fences, file_bundle, parse_ops, pick_files, run_checks, stage, undo_last
+import edits as E
 
 VERSION = os.environ.get("AIOFFICE_VERSION", "1.0.3")
 REPO = "ChampWinai/ai-office"
@@ -19,8 +19,6 @@ OLLAMA_EXE = Path(os.environ.get("LOCALAPPDATA", "")) / "Programs" / "Ollama" / 
 PORT = int(os.environ.get("PORT", 8000))
 MAX_ROUNDS = 3
 NO_WINDOW = 0x08000000
-SKIP = {".git", "node_modules", "__pycache__", ".office_bak", "venv", ".venv", "dist", "build"}
-TEXT = {".py", ".js", ".ts", ".html", ".css", ".json", ".md", ".txt", ".cs", ".java", ".c", ".cpp", ".h", ".go", ".rs", ".sh", ".bat", ".yml", ".yaml", ".toml", ".sql", ".xml"}
 
 
 def load_settings():
@@ -81,7 +79,8 @@ def ollama_tags():
 def config():
     keys = ("th", "room", "color", "hair", "phase", "model", "hard_model")
     return {"version": VERSION, "roles": {r: {k: c.get(k) for k in keys} for r, c in ROLES.items()},
-            "models": ollama_tags() or [], "provider": public_provider(), "test_cmd": CFG.get("test_cmd", "")}
+            "models": ollama_tags() or [], "provider": public_provider(), "test_cmd": proj().get("test_cmd", ""),
+            "git_commit": bool(proj().get("git_commit")), "num_ctx": int(CFG.get("num_ctx", 16384))}
 
 
 # ---------- AI provider: local Ollama, or an API (Anthropic-compatible / OpenAI-compatible) ----------
@@ -132,7 +131,7 @@ def openai_url(base):
     return base + "/chat/completions"
 
 
-def ask_api(p, system, messages):
+def ask_api(p, system, messages, usage=None):
     """Stream text from an Anthropic-compatible or OpenAI-compatible endpoint (SSE, or plain JSON as fallback)."""
     base = p["base_url"].rstrip("/")
     if p["type"] == "anthropic":
@@ -171,6 +170,12 @@ def ask_api(p, system, messages):
             if data == "[DONE]":
                 break
             ev = json.loads(data)
+            if usage is not None and ev.get("type") == "message_start":
+                usage["in"] = ev.get("message", {}).get("usage", {}).get("input_tokens", 0)
+            if usage is not None and (ev.get("usage") or {}).get("output_tokens"):
+                usage["out"] = ev["usage"]["output_tokens"]
+            if usage is not None and (ev.get("usage") or {}).get("completion_tokens"):
+                usage["in"], usage["out"] = ev["usage"].get("prompt_tokens", 0), ev["usage"]["completion_tokens"]
             if p["type"] == "anthropic":
                 if ev.get("type") == "error":
                     raise RuntimeError(ev.get("error", {}).get("message", str(ev)))
@@ -229,7 +234,7 @@ def setup_env(emit, pull_hard):
             emit(step="ollama", state="installing", msg="กำลังติดตั้ง Ollama (winget)…")
             p = subprocess.run(["winget", "install", "-e", "--id", "Ollama.Ollama", "--silent",
                                 "--accept-package-agreements", "--accept-source-agreements"],
-                               capture_output=True, text=True)
+                               capture_output=True, text=True, errors="replace")
             if not OLLAMA_EXE.exists() and not shutil.which("ollama"):
                 raise RuntimeError(f"ติดตั้ง Ollama ไม่สำเร็จ (winget exit {p.returncode})")
         exe = str(OLLAMA_EXE) if OLLAMA_EXE.exists() else "ollama"
@@ -319,7 +324,48 @@ def install_update(emit):
     threading.Timer(1.5, lambda: os._exit(0)).start()  # the updater relaunches the app after we exit
 
 
-# ---------- workspace files ----------
+# ---------- project settings, memory, rules ----------
+
+TOOLS_HELP = """
+# TOOLS - look at the project before deciding. One tool per line, nothing else on that line:
+SEARCH: <regex or words>            -> matching lines as path:line: text (max 40)
+READ: <path>   or   READ: <path>:<start>-<end>   -> file content (max 400 lines per call)
+LIST: <folder>                      -> entries of a folder ("." for the project root)
+After tool lines, stop: the results arrive in the next message. Never guess the content of a file you have not read.
+"""
+RULE_FILES = ("AGENTS.md", "CLAUDE.md", "AIOFFICE.md")
+
+
+def proj():
+    """Settings that belong to the current project: test command, git auto-commit, job history."""
+    return CFG.setdefault("projects", {}).setdefault(str(WS) if WS else "-", {})
+
+
+def project_rules():
+    """The project's own instructions file (like CLAUDE.md), read by every department."""
+    for name in RULE_FILES:
+        p = (WS / name) if WS else None
+        if p and p.is_file():
+            return f"\n# PROJECT RULES ({name})\n" + E.read_text(p)[0][:8000] + "\n"
+    return ""
+
+
+def record(task, ok, files, summary, secs):
+    h = proj().setdefault("history", [])
+    h.append({"ts": time.strftime("%Y-%m-%d %H:%M"), "task": task[:200], "ok": ok, "files": files[:20],
+              "summary": summary.strip()[:600], "secs": secs})
+    del h[:-20]
+    save_settings()
+
+
+def memory_text():
+    """The last jobs in this project, so a request like 'continue from before' has context."""
+    h = proj().get("history", [])[-3:]
+    if not h:
+        return ""
+    lines = [f"- {j['ts']} [{'ผ่าน' if j['ok'] else 'ไม่ผ่าน'}] {j['task']} | files: {', '.join(j['files']) or '-'} | {j['summary'][:300]}" for j in h]
+    return "\n\n# PREVIOUS JOBS IN THIS PROJECT (oldest first)\n" + "\n".join(lines) + "\n"
+
 
 def passed(fb):  # last "VERDICT: X" anywhere wins; unparseable => FAIL
     v = re.findall(r"VERDICT:\s*\**\s*(PASS|FAIL)", fb, re.I)
@@ -327,57 +373,39 @@ def passed(fb):  # last "VERDICT: X" anywhere wins; unparseable => FAIL
 
 
 def runnable(text):
-    """First python fence = the code we execute for QA."""
-    for f in fences(text):
+    """First python fence = the code we execute for QA (no-workspace mode)."""
+    for f in E.fences(text):
         if f["lang"] in ("", "python", "py") or (f["path"] or "").endswith(".py"):
             return f["body"]
 
 
-def workspace_files():
-    out = []
-    for root, dirs, files in os.walk(WS):
-        dirs[:] = [d for d in dirs if d not in SKIP]
-        out += [Path(root, f).relative_to(WS).as_posix() for f in files if Path(f).suffix.lower() in TEXT]
-        if len(out) > 200:
-            break
-    return sorted(out)[:200]
-
-
-def workspace_context(task, with_contents):
-    """File list (+ contents of files named in the task) for the prompts."""
-    if not WS:
-        return ""
-    files = workspace_files()
-    txt = f"\n\n# WORKSPACE ({WS})\nFiles: {', '.join(files) or '(empty)'}\n"
-    if with_contents:
-        for f in files:
-            if Path(f).name.lower() in task.lower():
-                txt += f"\n--- {f} ---\n{(WS / f).read_text(encoding='utf-8', errors='replace')[:8000]}\n--- end {f} ---\n"
-    return txt
-
-
 # ---------- the office ----------
 
-def ask(role, messages, hard=False):
-    """Yield text chunks from the active provider. hard=True picks the role's bigger model (Ollama only;
-    an API provider uses its one model for every role)."""
+def ask(role, messages, hard=False, usage=None, with_tools=False):
+    """Yield text chunks from the active provider; fills usage with token counts when the provider reports them."""
     cfg = ROLES[role]
-    system = (HERE / "rules.md").read_text(encoding="utf-8") + "\n" + cfg["prompt"]
+    system = ((HERE / "rules.md").read_text(encoding="utf-8") + project_rules() + "\n" + cfg["prompt"]
+              + (TOOLS_HELP if with_tools else ""))
     p = provider()
     if p["type"] != "ollama":
-        yield from ask_api(p, system, messages)
+        yield from ask_api(p, system, messages, usage)
         return
     body = {"model": cfg.get("hard_model", cfg["model"]) if hard else cfg["model"], "stream": True,
+            "options": {"num_ctx": int(CFG.get("num_ctx", 16384))},  # Ollama's default window (2-4k) silently cuts long prompts
             "messages": [{"role": "system", "content": system}] + messages}
     req = urllib.request.Request(OLLAMA + "/api/chat", json.dumps(body).encode(), {"Content-Type": "application/json"})
-    with urllib.request.urlopen(req, timeout=600) as r:
+    with urllib.request.urlopen(req, timeout=900) as r:
         for line in r:
-            if line.strip():
-                yield json.loads(line).get("message", {}).get("content", "")
+            if not line.strip():
+                continue
+            j = json.loads(line)
+            if j.get("done") and usage is not None:
+                usage["in"], usage["out"] = j.get("prompt_eval_count", 0), j.get("eval_count", 0)
+            yield j.get("message", {}).get("content", "")
 
 
 def run_code(code):
-    """Run DEV's code and its self-tests (10s limit, isolated mode, temp dir). Returns (report, ok)."""
+    """Run DEV's snippet and its self-tests (10s limit, isolated mode, temp dir). No-workspace mode only."""
     if not code:
         return "", True
     py = (shutil.which("python") or shutil.which("py")) if FROZEN else sys.executable  # frozen: sys.executable is the app itself
@@ -387,118 +415,183 @@ def run_code(code):
         f = os.path.join(d, "main.py")
         open(f, "w", encoding="utf-8").write(code)
         try:
-            r = subprocess.run([py, "-I", f], cwd=d, capture_output=True, text=True, timeout=10)
+            r = subprocess.run([py, "-I", f], cwd=d, capture_output=True, text=True, errors="replace", timeout=10)
             return f"exit={r.returncode}\n{(r.stdout + r.stderr)[-500:]}", r.returncode == 0
         except subprocess.TimeoutExpired:
             return "timeout 10s", False
 
 
 def wait_decision(timeout=300):
-    """Block until the page approves/rejects (or Stop is pressed, or it times out)."""
+    """Block until the page answers the last question (approve/reject), Stop is pressed, or it times out."""
     for _ in range(timeout):
         if CANCEL.is_set():
             raise Cancelled()
         if DECIDED.wait(1):
+            DECIDED.clear()
             return DECISION[0]
     return False
 
 
-def orchestrate(task, emit, approve=False):
+def orchestrate(task, emit, approve=False, mode="edit"):
+    """mode: "edit" (change files), "ask" (read-only answer), "plan" (the user approves the plan before any edit)."""
     hard = False
-    CANCEL.clear()  # one job at a time: the page disables RUN while a job runs
+    CANCEL.clear()
     DECIDED.clear()
+    t0 = time.time()
+    files = E.project_files(WS) if WS else []
+    read_paths, tokens = set(), {"n": 0}
 
-    def say(role, prompt, phase=None):
+    def say(role, prompt, phase=None, tools=0):
+        """One agent turn; with tools>0 it may SEARCH/READ/LIST the project up to that many times first."""
         emit(role=role, status="working", phase=phase or ROLES[role].get("phase"))
-        out = ""
-        for tok in ask(role, [{"role": "user", "content": prompt}], hard):
-            if CANCEL.is_set():
-                raise Cancelled()
-            out += tok
-            emit(role=role, token=tok)
-        emit(role=role, status="done")
+        messages, out = [{"role": "user", "content": prompt}], ""
+        for turn in range(tools + 1):
+            usage, part = {"in": 0, "out": 0}, ""
+            for tok in ask(role, messages, hard, usage, with_tools=tools > 0 and WS is not None):
+                if CANCEL.is_set():
+                    raise Cancelled()
+                part += tok
+                emit(role=role, token=tok)
+            tokens["n"] += (usage["in"] or len(json.dumps(messages, ensure_ascii=False)) // 3) + (usage["out"] or len(part) // 3)
+            out += part
+            calls = E.tool_calls(part)[:6] if WS and turn < tools else []
+            if not calls:
+                break
+            results = []
+            for kind, arg in calls:
+                try:
+                    res = E.run_tool(WS, files, kind, arg)
+                except (E.EditError, OSError) as e:
+                    res = f"(ผิดพลาด: {e})"
+                if kind == "READ":
+                    read_paths.add(re.sub(r":\d+(-\d+)?$", "", arg.strip().strip("`")))
+                results.append(f"[{kind}: {arg}]\n{res}")
+            emit(role=role, token="\n\n🔎 " + " · ".join(f"{k} {a[:60]}" for k, a in calls) + "\n\n")
+            messages += [{"role": "assistant", "content": part},
+                         {"role": "user", "content": "TOOL RESULTS:\n" + "\n\n".join(results)[:30000]
+                          + "\n\nContinue. When you have enough information, give your final answer without tool lines."}]
+        emit(role=role, status="done", tokens=tokens["n"])
         return out
 
-    spec = say("BOSS", f"คำสั่งจากลูกค้า: {task}{workspace_context(task, False)}\nเขียนสเปกงาน")
+    memory = memory_text()
+    wsctx = f"\n\n# WORKSPACE ({WS})\nFiles: {E.summary(files)}\n" if WS else ""
+
+    if mode == "ask":  # read-only: the analyst looks around and answers
+        bundle = E.file_bundle(WS, E.pick_files(task, "", files)) if WS else ""
+        answer = say("PLAN", f"QUESTION from the user about this project. First use the TOOLS to find and READ the code that answers it, "
+                             f"then answer clearly in Thai, citing file paths and function names. Do NOT propose edits and do not end with a FILES line.\n"
+                             f"{task}{memory}{wsctx}" + (f"\n\nFILES THAT MAY BE RELEVANT:{bundle}" if bundle else ""),
+                     phase="plan", tools=6)
+        record(task, True, [], answer, round(time.time() - t0))
+        emit(done=True, tokens=tokens["n"])
+        return
+
+    spec = say("BOSS", f"คำสั่งจากลูกค้า: {task}{memory}{wsctx}\nเขียนสเปกงาน")
     hard = bool(re.search(r"LEVEL:\s*HARD", spec, re.I))
     emit(note="ระดับงาน: " + ("HARD → ใช้โมเดลใหญ่" if hard else "EASY"))
-    wsctx = workspace_context(task, False)
-    notes = ""  # plan-phase departments think before anyone edits; their notes go to DEV
+    notes = ""  # plan-phase departments look at the project and think before anyone edits
     for name, cfg in ROLES.items():
         if cfg.get("phase") == "plan":
-            out = say(name, f"Original request (authoritative):\n{task}\n\nSpec:\n{spec}{wsctx}"
+            out = say(name, f"Original request (authoritative):\n{task}\n\nSpec:\n{spec}{memory}{wsctx}"
                             + (f"\n\nEarlier departments said:\n{notes}" if notes else "")
-                            + ("\n\nEnd your answer with one line: FILES: path1, path2 (files to read or change, exact relative paths)" if WS else ""))
+                            + ("\n\nUse the tools to find the relevant code, then end your answer with one line: FILES: path1, path2" if WS else ""),
+                      tools=4)
             notes += f"\n\n[{cfg['th']}]\n{out}"
+    if mode == "plan":
+        emit(plan_review=True)
+        if not wait_decision():
+            emit(note="ยกเลิก: ไม่อนุมัติแผน ไม่มีการแก้ไฟล์")
+            record(task, False, [], "ผู้ใช้ไม่อนุมัติแผน", round(time.time() - t0))
+            emit(done=False, tokens=tokens["n"])
+            return
+        approve = True
 
     def edit_loop():
-        """Workspace mode: DEV proposes edits -> applied to a COPY -> checks -> QA reads the diff -> approve -> commit."""
+        """Workspace mode: DEV proposes edits -> applied to a COPY -> commands + checks -> QA reads the diff -> approve -> commit."""
         nonlocal hard
-        picked = pick_files(task, notes, workspace_files())
+        picked = E.pick_files(task, notes, files, read_paths)
         if picked:
             emit(note="อ่านไฟล์: " + ", ".join(picked))
-        bundle = file_bundle(WS, picked) if picked else ""
-        test_cmd = CFG.get("test_cmd", "")
+        bundle = E.file_bundle(WS, picked)
+        test_cmd = proj().get("test_cmd", "")
         pyexe = (shutil.which("python") or shutil.which("py")) if FROZEN else sys.executable
-        feedback, result, last, ok, changed, root, rnd, diff = "", "", "", False, [], None, 0, ""
-        files = workspace_files()
+        named = [f for f in files if f in task or (len(Path(f).name) > 4 and Path(f).name in task)]  # the request names them
+        allowed_cmds, denied_cmds = set(), set()
+        feedback, result, last, ok, changed, deleted, root, rnd, diff = "", "", "", False, [], [], None, 0, ""
         try:
             for rnd in range(MAX_ROUNDS):
                 emit(round=rnd + 1)
                 redo = f"\n\nYour previous answer:\n{last}\n\nQA FEEDBACK:\n{feedback}\n\nCHECK RESULT:\n{result}" if feedback else ""
                 last = say("DEV", f"Original request (authoritative, follow it exactly):\n{task}\n\nSpec:\n{spec}"
-                                  f"\n\nDepartment notes (follow the change plan and security rules):{notes}"
-                                  f"{wsctx}\n\nCURRENT FILES:{bundle}{redo}")
-                ops = parse_ops(last)
-                named = re.search(r"[\w\-./]+\.\w+", task)
-                loose = [f for f in fences(last) if not f["path"] and f["lang"] in ("", "python", "py")]
-                if not ops and named and loose:  # a bare code block: it belongs to the file the request names
-                    ops = [{"kind": "write", "path": named.group(0), "body": loose[0]["body"]}]
+                                  f"\n\nDepartment notes (follow the change plan and security rules):{notes}{memory}"
+                                  f"{wsctx}\n\nCURRENT FILES:{bundle}{redo}", tools=2)
+                ops = E.parse_ops(last)
+                hit = re.search(r"[\w\-./]+\.\w+", task)
+                loose = [f for f in E.fences(last) if not f["path"] and f["lang"] in ("", "python", "py")]
+                if not ops and hit and loose:  # a bare code block: it belongs to the file the request names
+                    ops = [{"kind": "write", "path": hit.group(0), "body": loose[0]["body"]}]
+                cmds = [o["cmd"] for o in ops if o["kind"] == "run"]
+                new_cmds = [c for c in cmds if c not in allowed_cmds and c not in denied_cmds]
+                if new_cmds:  # every shell command is the user's call, even outside approve mode
+                    emit(confirm_run=new_cmds)
+                    (allowed_cmds if wait_decision() else denied_cmds).update(new_cmds)
                 if root:
                     shutil.rmtree(root, ignore_errors=True)
-                root = stage(WS, SKIP)
-                changed, errs = apply_ops(root, ops)
-                if not ops:
-                    errs = ["ไม่พบการแก้ไข: ตอบด้วย block เต็มไฟล์ (path=...) หรือ SEARCH/REPLACE"]
-                named_files = [f for f in files if f in task or Path(f).name in task]  # the request names them: they must change
-                missing = [f for f in named_files if f not in changed]
+                root, copied = E.stage(WS, files)
+                errs = E.apply_ops(root, ops)
+                run_out = E.run_cmds(root, [c for c in cmds if c in allowed_cmds])
+                denied = [c for c in cmds if c in denied_cmds]
+                if denied:  # the user's choice, not a defect: the rest of the change is still judged on its own
+                    run_out = (run_out + "\n" if run_out else "") + "ผู้ใช้ไม่อนุญาตให้รันคำสั่ง (ข้ามไป ไม่ต้องรันอีก): " + ", ".join(denied)
+                changed, deleted = E.changes(WS, root, copied)
+                missing = [f for f in named if f not in changed and f not in deleted]
                 if missing:
-                    errs.append("คำสั่งระบุให้แก้ไฟล์เหล่านี้ แต่ยังไม่มีการแก้: " + ", ".join(missing))
-                report, checks_ok = run_checks(root, changed, test_cmd, pyexe)
-                result = ("\n".join(errs) + "\n" if errs else "") + report
-                emit(note="ตรวจในสำเนา: " + (", ".join(changed) or "ไม่มีไฟล์เปลี่ยน") + (f" · ข้อผิดพลาด {len(errs)}" if errs else ""))
+                    errs.append("คำสั่งระบุไฟล์เหล่านี้ แต่ยังไม่มีการแก้: " + ", ".join(missing))
+                if not ops:
+                    errs = ["ไม่พบการแก้ไข: ตอบด้วย block เต็มไฟล์ (path=...), SEARCH/REPLACE, DELETE/RENAME หรือ RUN"]
+                report, checks_ok = E.run_checks(root, changed, test_cmd, pyexe)
+                result = "\n".join(errs + ([run_out] if run_out else []) + [report])
+                emit(note="ตรวจในสำเนา: " + (", ".join(changed + [f"ลบ {d}" for d in deleted]) or "ไม่มีไฟล์เปลี่ยน")
+                     + (f" · ข้อผิดพลาด {len(errs)}" if errs else ""))
                 if errs:
                     emit(note="แก้ไม่สำเร็จ: " + " | ".join(errs)[:400])
-                diff = diff_for(WS, root, changed) if changed else ""
+                diff = E.diff_for(WS, root, changed, deleted) if (changed or deleted) else ""
+                if diff:
+                    emit(note=f"diff รอบที่ {rnd + 1} (ยังไม่เขียนจริง)", diff=diff)
                 feedback = say("QA", f"Original request (authoritative):\n{task}\n\nSpec:\n{spec}\n\nDIFF:\n{diff}\n\nCHECK RESULT:\n{result}")
-                ok = passed(feedback) and checks_ok and not errs and bool(changed)
+                ok = passed(feedback) and checks_ok and not errs and bool(changed or deleted)
                 if passed(feedback) and not ok:
                     emit(note="QA ให้ PASS แต่การตรวจไม่ผ่าน → ตีกลับอัตโนมัติ")
                     feedback += "\nSYSTEM: checks failed, verdict overridden to FAIL."
                 if ok:
                     break
             if ok:
-                emit(note="แก้ไขไฟล์: " + ", ".join(changed), diff=diff)
+                emit(note="แก้ไขไฟล์: " + ", ".join(changed + [f"ลบ {d}" for d in deleted]), diff=diff)
                 declined = False
                 if approve:
-                    emit(approve=True, files=changed)
+                    emit(approve=True, files=changed + deleted)
                     declined = not wait_decision()
                     if declined:
                         emit(note="ไม่เขียนไฟล์ (ไม่อนุมัติหรือหมดเวลา)")
                 if not declined:
-                    run = commit(WS, root, changed)
-                    emit(note=f"เขียนไฟล์ {len(changed)} ไฟล์ (สำรองของเดิมไว้ที่ .office_bak/{run})", files=changed, applied=run)
+                    run = E.commit(WS, root, changed, deleted)
+                    emit(note=f"เขียน {len(changed)} ไฟล์, ลบ {len(deleted)} ไฟล์ (สำรองของเดิมไว้ที่ .office_bak/{run})",
+                         files=changed + deleted, applied=run)
+                    if proj().get("git_commit") and E.is_git(WS):
+                        emit(note="git: " + E.git_commit(WS, changed + deleted, "AI Office: " + task[:72]))
+                else:
+                    ok = False
             else:
                 emit(note="ไม่ผ่านการตรวจ จึงไม่เขียนไฟล์")
         finally:
             if root:
                 shutil.rmtree(root, ignore_errors=True)
-        return ok, rnd, feedback, last
+        return ok, rnd, feedback, last, changed + deleted
 
     if WS:
-        ok, rnd, feedback, code = edit_loop()
+        ok, rnd, feedback, code, touched = edit_loop()
     else:
-        code, feedback, result, seen, ok, rnd = "", "", "", set(), False, 0
+        code, feedback, result, seen, ok, rnd, touched = "", "", "", set(), False, 0, []
         for rnd in range(MAX_ROUNDS):
             emit(round=rnd + 1)
             redo = f"\n\nPrevious code:\n{code}\n\nQA feedback:\n{feedback}\n\nRUN RESULT of previous code:\n{result}" if feedback else ""
@@ -524,11 +617,15 @@ def orchestrate(task, emit, approve=False):
             if ok:
                 break
         emit(note="ไม่ได้เลือกโฟลเดอร์งาน: โค้ดแสดงอย่างเดียว ไม่เขียนไฟล์")
-    say("BOSS", f"สรุปผลให้ลูกค้า ผลตรวจ: {'ผ่าน' if ok else f'ไม่ผ่านหลัง {rnd + 1} รอบ'}\nQA:\n{feedback}\nCode:\n{code}", phase="report")
-    emit(done=ok)
+    summary = say("BOSS", f"สรุปผลให้ลูกค้า ผลตรวจ: {'ผ่าน' if ok else f'ไม่ผ่านหลัง {rnd + 1} รอบ'}\nQA:\n{feedback}\nCode:\n{code[:4000]}", phase="report")
+    record(task, ok, touched, summary, round(time.time() - t0))
+    emit(done=ok, tokens=tokens["n"])
 
 
 # ---------- HTTP ----------
+
+JOB = threading.Lock()  # one job at a time
+
 
 class H(BaseHTTPRequestHandler):
     def reply(self, code, obj, ctype="application/json"):
@@ -551,9 +648,13 @@ class H(BaseHTTPRequestHandler):
 
     def do_GET(self):
         if self.path == "/workspace":
-            return self.reply(200, {"path": str(WS) if WS else "", "files": workspace_files() if WS else []})
+            return self.reply(200, {"path": str(WS) if WS else "", "count": len(E.project_files(WS)) if WS else 0})
         if self.path == "/config":
             return self.reply(200, config())
+        if self.path == "/history":
+            return self.reply(200, proj().get("history", [])[::-1])
+        if self.path == "/git":
+            return self.reply(200, E.git_status(WS) if WS else {"git": False})
         if self.path == "/setup/status":
             return self.reply(200, setup_status())
         if self.path == "/update":
@@ -564,11 +665,11 @@ class H(BaseHTTPRequestHandler):
         # file writes are possible, so refuse cross-site requests (a web page POSTing to localhost)
         if self.headers.get("Origin") not in (None, f"http://localhost:{PORT}", f"http://127.0.0.1:{PORT}"):
             return self.reply(403, {"error": "forbidden origin"})
-        body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+        body = json.loads(self.rfile.read(int(self.headers["Content-Length"])) or b"{}")
         try:
             if self.path == "/workspace":
                 set_ws(body["path"])
-                return self.reply(200, {"path": str(WS), "files": workspace_files()})
+                return self.reply(200, {"path": str(WS), "count": len(E.project_files(WS))})
             if self.path == "/models":
                 set_model(body["role"], body["kind"], body["name"])
                 return self.reply(200, {"ok": True})
@@ -578,12 +679,24 @@ class H(BaseHTTPRequestHandler):
             if self.path == "/provider/test":
                 return self.reply(200, {"reply": test_provider(body)})
             if self.path == "/undo":
-                run, files = undo_last(WS)
+                if not WS:
+                    raise ValueError("ยังไม่ได้เลือกโฟลเดอร์งาน")
+                run, files = E.undo_last(WS)
                 return self.reply(200, {"run": run, "files": files})
             if self.path == "/settings":
-                CFG["test_cmd"] = (body.get("test_cmd") or "").strip()
+                if "test_cmd" in body:
+                    proj()["test_cmd"] = (body.get("test_cmd") or "").strip()
+                if "git_commit" in body:
+                    proj()["git_commit"] = bool(body["git_commit"])
+                if "num_ctx" in body:
+                    CFG["num_ctx"] = max(2048, int(body["num_ctx"]))
                 save_settings()
                 return self.reply(200, {"ok": True})
+            if self.path == "/run_test":
+                cmd = proj().get("test_cmd", "")
+                if not (WS and cmd):
+                    raise ValueError("ยังไม่ได้ตั้งคำสั่งทดสอบหรือโฟลเดอร์งาน")
+                return self.reply(200, {"output": E.run_cmds(WS, [cmd], timeout=300)})
             if self.path == "/stop":
                 CANCEL.set()
                 return self.reply(200, {"ok": True})
@@ -594,7 +707,12 @@ class H(BaseHTTPRequestHandler):
         except Exception as e:
             return self.reply(400, {"error": str(e)})
         if self.path == "/":
-            return self.stream(lambda emit: orchestrate(body["task"], emit, bool(body.get("approve"))))
+            if not JOB.acquire(blocking=False):
+                return self.reply(409, {"error": "มีงานกำลังรันอยู่ รอให้เสร็จหรือกดหยุดก่อน"})
+            try:
+                return self.stream(lambda emit: orchestrate(body["task"], emit, bool(body.get("approve")), body.get("mode", "edit")))
+            finally:
+                JOB.release()
         if self.path == "/setup":
             return self.stream(lambda emit: setup_env(emit, bool(body.get("pull_hard"))))
         if self.path == "/update/install":

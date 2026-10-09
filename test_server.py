@@ -13,13 +13,13 @@ def test_passed():
 
 def test_fences_and_runnable():
     text = "spec\n```python path=a.py\nx = 1\n```\n```\nplain\n```"
-    fs = server.fences(text)
+    fs = server.E.fences(text)
     assert fs[0]["path"] == "a.py" and fs[0]["body"] == "x = 1\n"
     assert server.runnable(text) == "x = 1\n"
 
 
 def test_path_as_first_body_line():
-    fs = server.fences("```python\npath=b.py\ny = 2\n```")
+    fs = server.E.fences("```python\npath=b.py\ny = 2\n```")
     assert fs[0]["path"] == "b.py" and fs[0]["body"] == "y = 2\n"
 
 

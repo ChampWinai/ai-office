@@ -102,6 +102,8 @@ pre button{position:absolute;top:6px;right:6px;font:600 11px "Segoe UI";cursor:p
 form{display:flex;gap:8px;margin-top:10px;align-items:center;flex-wrap:wrap}
 form input[type=text],#task{flex:1;min-width:0;padding:10px 12px;font:13px "Segoe UI",sans-serif;background:#040b16;color:var(--txt);border:1px solid var(--line);border-radius:10px}
 #task:focus{outline:1px solid var(--neon)}
+#task{flex-basis:100%}
+#mode{flex:1;min-width:0}
 .ap{font-size:11px;color:var(--dim);white-space:nowrap;display:flex;align-items:center;gap:5px;cursor:pointer}
 #appr{margin:0;accent-color:var(--neon)}
 #go{padding:10px 18px}
@@ -167,7 +169,7 @@ dialog::backdrop{background:rgba(2,6,14,.6)}
 <div class="banner warn" id="setupBanner"><div class="bt"><span id="setupMsg"></span><div class="bar" id="setupBar"><i id="setupFill"></i></div></div><button class="btn sm" id="setupBtn">ตั้งค่าอัตโนมัติ</button></div>
 
 <div class="card" id="wsbar"><span class="lbl">📁 โฟลเดอร์งาน</span><span id="wspath">ยังไม่ได้เลือก (โค้ดแสดงอย่างเดียว ไม่เขียนไฟล์)</span><button class="btn ghost sm" id="wsbtn">เลือกโฟลเดอร์</button></div>
-<div class="card" id="cmdbar" style="display:flex;align-items:center;gap:10px;margin:8px 10px 0;padding:6px 14px"><span class="lbl" style="margin:0">🧪 คำสั่งทดสอบ</span><input id="testCmd" placeholder="เช่น python -m unittest  (เว้นว่างได้ ระบบจะเช็ก syntax อย่างเดียว)" style="flex:1;min-width:0;padding:6px 10px;background:#040b16;color:var(--txt);border:1px solid var(--line);border-radius:9px;font:12px Consolas,monospace"><button class="btn ghost sm" id="testSave">บันทึก</button><button class="btn ghost sm" id="undoBtn" title="ย้อนการเขียนไฟล์ครั้งล่าสุด">↶ ย้อนการแก้ไขล่าสุด</button></div>
+<div class="card" id="cmdbar" style="display:flex;align-items:center;gap:10px;margin:8px 10px 0;padding:6px 14px"><span class="lbl" style="margin:0">🧪 คำสั่งทดสอบ</span><input id="testCmd" placeholder="เช่น python -m unittest  (เว้นว่างได้ ระบบจะเช็ก syntax อย่างเดียว)" style="flex:1;min-width:0;padding:6px 10px;background:#040b16;color:var(--txt);border:1px solid var(--line);border-radius:9px;font:12px Consolas,monospace"><button class="btn ghost sm" id="testSave">บันทึก</button><button class="btn ghost sm" id="undoBtn" title="ย้อนการเขียนไฟล์ครั้งล่าสุด">↶ ย้อนการแก้ไขล่าสุด</button><label class="ap" title="หลังเขียนไฟล์ ให้ git commit เฉพาะไฟล์ที่แก้ (ถ้าอยู่บน main/master จะสร้าง branch ใหม่ก่อน)"><input type="checkbox" id="gitCommit">git commit อัตโนมัติ</label><span id="gitInfo" style="font-size:11px;color:var(--dim);white-space:nowrap"></span></div>
 
 <main>
  <div class="col" id="team">
@@ -182,7 +184,8 @@ dialog::backdrop{background:rgba(2,6,14,.6)}
  </div>
  <div class="col" id="rooms"></div>
  <div class="col"><section class="card" id="logbox"><div class="lbl">บันทึกกิจกรรม</div><div id="log"></div>
-  <form><input id="task" placeholder="สั่งงานหัวหน้า เช่น สร้างไฟล์ prime.py มีฟังก์ชัน is_prime(n)" required>
+  <form><input id="task" placeholder="สั่งงาน เช่น แก้ cleaner.py ให้... หรือพิมพ์ /help" required>
+   <select id="mode" title="โหมด" style="padding:9px 8px;border-radius:10px;border:1px solid var(--line);background:#040b16;color:var(--txt);font:12px 'Segoe UI'"><option value="edit">✏️ แก้โค้ด</option><option value="ask">💬 ถาม (อ่านอย่างเดียว)</option><option value="plan">🗺 วางแผนก่อน</option></select>
    <label class="ap"><input type="checkbox" id="appr">ยืนยันก่อนเขียนไฟล์</label>
    <button class="btn" id="go">RUN</button><button id="stop" type="button" disabled>หยุด</button></form>
  </section></div>
@@ -193,6 +196,7 @@ dialog::backdrop{background:rgba(2,6,14,.6)}
  <span>AI AGENTS <b id="ag">0/0</b></span>
  <span>ROUND <span class="seg" id="seg"><i></i><i></i><i></i></span></span>
  <span>เวลา <b id="el">0s</b></span>
+ <span>โทเคน <b id="tok">0</b></span>
 </footer>
 
 <script>
@@ -296,8 +300,20 @@ function render(el,text){
 function diffHtml(d){
  return `<pre>${d.split("\n").map(l=>`<span class="${l.startsWith("+")&&!l.startsWith("+++")?"add":l.startsWith("-")&&!l.startsWith("---")?"del":""}">${esc(l)}</span>`).join("\n")}</pre>`;
 }
-const hist=()=>safe(()=>JSON.parse(localStorage.hist||"[]"),[]);
-function showHist(){$("hist").innerHTML=hist().map(h=>`<div class="${h.ok?"pass":"fail"}">${h.ok?"✔":"✘"} ${h.s}s · ${esc(h.t)}</div>`).join("")||'<div style="color:var(--dim)">ยังไม่มีงาน</div>'}
+async function loadHist(){
+ const h=await fetch("/history").then(r=>r.json()).catch(()=>[]);
+ $("hist").innerHTML=h.map(x=>`<div class="${x.ok?"pass":"fail"}" title="${esc(x.ts+" · "+(x.summary||""))}">${x.ok?"✔":"✘"} ${x.secs}s · ${esc(x.task.slice(0,48))}</div>`).join("")||'<div style="color:var(--dim)">ยังไม่มีงานในโปรเจกต์นี้</div>'}
+async function loadGit(){
+ const g=await fetch("/git").then(r=>r.json()).catch(()=>({}));
+ $("gitInfo").textContent=g.git?`git: ${g.branch} · เปลี่ยน ${g.dirty} ไฟล์`:"";
+ $("gitCommit").parentElement.style.display=g.git?"flex":"none"}
+function askBox(html,okText,noText){
+ const d=document.createElement("div");d.className="apv";d.style.flexWrap="wrap";
+ d.innerHTML=(html?`<div style="flex-basis:100%">${html}</div>`:"")+`<button data-ok="1">${okText}</button><button data-ok="0">${noText}</button>`;
+ d.querySelectorAll("button").forEach(b=>b.onclick=()=>{d.querySelectorAll("button").forEach(x=>x.disabled=true);
+  fetch("/decide",{method:"POST",body:JSON.stringify({ok:b.dataset.ok==="1"})})});
+ $("log").append(d);$("log").scrollTop=$("log").scrollHeight}
+function logLine(html){$("log").insertAdjacentHTML("beforeend",`<div class="msg" style="--c:var(--neon)">${html}</div>`);$("log").scrollTop=$("log").scrollHeight}
 function showSteps(){const mx=Math.max(...steps.map(s=>s.d),1);$("steps").innerHTML=steps.map(s=>`<i title="${esc(s.r)} ${s.d.toFixed(0)}s" style="--c:${col(s.r)};height:${Math.max(10,s.d/mx*100)}%"></i>`).join("")}
 function newMsg(role){
  const d=document.createElement("div");d.className="msg";d.style.setProperty("--c",col(role));
@@ -308,12 +324,9 @@ function newMsg(role){
 function handle(e){
  const log=$("log");
  if(e.error){log.insertAdjacentHTML("beforeend",`<div class="msg err"><span class="fail">⚠ ${esc(e.error)}</span><br><small>${esc(errHint())}</small></div>`);$("sys").textContent="ERROR";return}
- if(e.approve){
-  const d=document.createElement("div");d.className="apv";
-  d.innerHTML='<button data-ok="1">อนุมัติเขียนไฟล์</button><button data-ok="0">ไม่อนุมัติ</button>';
-  d.querySelectorAll("button").forEach(b=>b.onclick=()=>{d.querySelectorAll("button").forEach(x=>x.disabled=true);
-   fetch("/decide",{method:"POST",body:JSON.stringify({ok:b.dataset.ok==="1"})})});
-  log.append(d);log.scrollTop=log.scrollHeight;return}
+ if(e.approve){askBox("ตรวจ diff ด้านบนแล้วเลือก:","อนุมัติเขียนไฟล์","ไม่อนุมัติ");return}
+ if(e.confirm_run){askBox(`ขออนุญาตรันคำสั่งในสำเนาโปรเจกต์:<pre>${esc(e.confirm_run.join("\n"))}</pre>`,"อนุญาต","ไม่อนุญาต");return}
+ if(e.plan_review){askBox("อ่านแผนของนักวิเคราะห์ด้านบน แล้วอนุมัติก่อนเริ่มแก้ไฟล์","อนุมัติแผน","ยกเลิก");return}
  if(e.files)fetch("/workspace").then(r=>r.json()).then(showWs);
  if(e.applied){log.insertAdjacentHTML("beforeend",`<div class="sep">บันทึกการแก้ไขแล้ว · <button class="btn ghost sm" onclick="undoLast(this)">↶ ย้อนกลับ</button></div>`);return}
  if(e.note){
@@ -324,15 +337,14 @@ function handle(e){
  if(e.round){
   $("seg").querySelectorAll("i").forEach((s,i)=>s.classList.toggle("f",i<e.round));
   log.insertAdjacentHTML("beforeend",`<div class="sep">รอบที่ ${e.round}</div>`);return}
- if("done" in e){
-  const s=Math.round((Date.now()-t0)/1000),h=hist();
-  h.unshift({ok:e.done,s,t:taskTxt.slice(0,40)});safe(()=>localStorage.hist=JSON.stringify(h.slice(0,8)));showHist();return}
+ if("done" in e){if(e.tokens)$("tok").textContent=e.tokens.toLocaleString();return}
  const mon=$(e.role).querySelector(".t");
  if(e.status=="working"){
   stepT=Date.now();stage(STAGES.findIndex(s=>s[0]==e.phase));
   setSt(e.role,"on");newMsg(e.role);mon.className="t";mon.textContent="…"}
  if(e.token){curText+=e.token;render(cur.querySelector(".t"),curText);mon.textContent=curText.slice(-260)}
  if(e.status=="done"){
+  if(e.tokens)$("tok").textContent=e.tokens.toLocaleString();
   setSt(e.role,"done");steps.push({r:e.role,d:(Date.now()-stepT)/1000});showSteps();
   if(e.role=="QA"){
    const v=[...curText.matchAll(/VERDICT:\s*\**\s*(PASS|FAIL)/gi)].pop();
@@ -344,12 +356,14 @@ function handle(e){
 }
 
 /* ---------- workspace ---------- */
-function showWs(j){const e=$("wspath");e.textContent=j.path?`${j.path}  (${j.files.length} ไฟล์)`:"ยังไม่ได้เลือก (โค้ดแสดงอย่างเดียว ไม่เขียนไฟล์)";e.className=j.path?"set":""}
+function showWs(j){const e=$("wspath");e.textContent=j.path?`${j.path}  (${j.count??(j.files||[]).length} ไฟล์)`:"ยังไม่ได้เลือก (โค้ดแสดงอย่างเดียว ไม่เขียนไฟล์)";e.className=j.path?"set":""}
 $("wsbtn").onclick=async()=>{ // desktop app: native folder dialog; browser: ask for a path
  const p=window.pywebview?.api?await window.pywebview.api.pick_folder():prompt("พิมพ์พาธโฟลเดอร์งาน เช่น C:\\Users\\me\\myproject");
  if(!p)return;
  const r=await fetch("/workspace",{method:"POST",body:JSON.stringify({path:p})}),j=await r.json();
- if(j.error)alert(j.error);else showWs(j)};
+ if(j.error)return alert(j.error);
+ showWs(j);CFG=await fetch("/config").then(r=>r.json());
+ $("testCmd").value=CFG.test_cmd||"";$("gitCommit").checked=!!CFG.git_commit;loadHist();loadGit()};
 
 /* ---------- environment setup ---------- */
 function setupText(t){$("setupMsg").textContent=t}
@@ -398,19 +412,32 @@ $("updBtn").onclick=async()=>{
 };
 
 /* ---------- submit a job ---------- */
+const HELP=`<b>คำสั่ง</b><br>/ask คำถาม — ถามเกี่ยวกับโปรเจกต์ (อ่านอย่างเดียว)<br>/plan งาน — ให้อนุมัติแผนก่อนแก้ไฟล์<br>/edit งาน — แก้โค้ด (ค่าเริ่มต้น)<br>/test — รันคำสั่งทดสอบในโปรเจกต์จริง<br>/git — ดูสถานะ git<br>/undo — ย้อนการแก้ไขล่าสุด<br>/help — รายการนี้`;
 document.querySelector("form").onsubmit=async ev=>{
- ev.preventDefault();$("go").disabled=true;$("stop").disabled=false;$("log").innerHTML="";
- M.run++;setM();stage(-1);steps=[];showSteps();taskTxt=$("task").value;
+ ev.preventDefault();
+ let task=$("task").value.trim(),mode=$("mode").value;
+ if(task.startsWith("/")){
+  const cmd=task.split(/\s+/)[0].toLowerCase(),arg=task.slice(cmd.length).trim();
+  if(cmd=="/help")return logLine(HELP);
+  if(cmd=="/undo")return undoLast();
+  if(cmd=="/git"){const g=await fetch("/git").then(r=>r.json());return logLine(g.git?`git: ${esc(g.branch)}<pre>${esc(g.status||"(ไม่มีไฟล์ค้าง)")}</pre>`:"ไม่ใช่ git repo")}
+  if(cmd=="/test"){logLine("กำลังรันคำสั่งทดสอบ…");const r=await fetch("/run_test",{method:"POST",body:"{}"}),j=await r.json();return logLine(j.error?`⚠ ${esc(j.error)}`:`<pre>${esc(j.output)}</pre>`)}
+  if(!["/ask","/plan","/edit"].includes(cmd))return logLine(`ไม่รู้จักคำสั่ง ${esc(cmd)} พิมพ์ /help`);
+  mode=cmd.slice(1);task=arg;if(!task)return logLine("ใส่ข้อความหลังคำสั่งด้วย เช่น "+cmd+" ...");
+ }
+ $("go").disabled=true;$("stop").disabled=false;$("log").innerHTML="";
+ M.run++;setM();stage(-1);steps=[];showSteps();taskTxt=task;
  ROLES.forEach(r=>{setSt(r,"idle");const t=$(r).querySelector(".t");t.className="t idle";t.textContent="รอรับงาน…";S[r].wave=0});
  $("seg").querySelectorAll("i").forEach(s=>s.classList.remove("f"));$("sys").textContent="RUNNING";
  t0=Date.now();clearInterval(timer);timer=setInterval(()=>$("el").textContent=Math.round((Date.now()-t0)/1000)+"s",500);
  try{
-  const r=await fetch("/",{method:"POST",body:JSON.stringify({task:$("task").value,approve:$("appr").checked})});
+  const r=await fetch("/",{method:"POST",body:JSON.stringify({task,mode,approve:$("appr").checked})});
   await readStream(r,handle);
   if($("sys").textContent!="ERROR")$("sys").textContent="OPTIMAL";
  }catch(err){handle({error:err.message})}
  clearInterval(timer);stage(5);ROLES.forEach(r=>{S[r].on=false;$(r).classList.remove("on")});
  $("ag").textContent="0/"+ROLES.length;$("go").disabled=false;$("stop").disabled=true;
+ loadHist();loadGit();
 };
 $("stop").onclick=()=>fetch("/stop",{method:"POST",body:"{}"});
 
@@ -472,8 +499,9 @@ $("testSave").onclick=async()=>{
  CFG=await fetch("/config").then(r=>r.json());
  $("ver").textContent="v"+CFG.version;
  buildOffice();
- $("testCmd").value=CFG.test_cmd||"";
- showHist();
+ $("testCmd").value=CFG.test_cmd||"";$("gitCommit").checked=!!CFG.git_commit;
+ $("gitCommit").onchange=()=>fetch("/settings",{method:"POST",body:JSON.stringify({git_commit:$("gitCommit").checked})});
+ loadHist();loadGit();
  setInterval(()=>$("clock").textContent=new Date().toTimeString().slice(0,8),1000);
  fetch("/workspace").then(r=>r.json()).then(showWs).catch(()=>{});
  checkSetup();

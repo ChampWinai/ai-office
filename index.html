@@ -20,7 +20,7 @@ header h1 small{font-size:11px;color:var(--dim)}
 #wspath{flex:1;min-width:0;color:var(--dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 #wspath.set{color:#4ade80}
 #wsbtn{background:var(--neon);color:#001;border:0;font:bold 12px monospace;padding:3px 10px;cursor:pointer}
-main{flex:1;min-height:0;display:grid;grid-template-columns:200px minmax(0,1fr) minmax(0,1.1fr);gap:6px;padding:6px}
+main{flex:1;min-height:0;display:grid;grid-template-columns:240px minmax(0,1fr) minmax(0,1.1fr);gap:6px;padding:6px}
 .col{display:flex;flex-direction:column;gap:6px;min-height:0;min-width:0}
 .box.p{padding:8px}
 .mem{display:flex;align-items:center;gap:8px;padding:5px 0;border-bottom:1px dashed #1e6f8f55}
@@ -63,8 +63,14 @@ form button:disabled{opacity:.4}
 #appr{flex:none;width:auto;padding:0;border:0;margin:0}
 .ap{font-size:11px;color:var(--dim);white-space:nowrap;display:flex;align-items:center;gap:4px}
 .mem{flex-wrap:wrap}
-.msel{flex-basis:100%;display:flex;gap:4px;padding:0 0 4px 30px}
-.msel select{flex:1;min-width:0;font:10px monospace;background:#02080f;color:var(--txt);border:1px solid var(--line)}
+.msel{flex-basis:100%;display:grid;gap:4px;padding:0 0 8px 30px}
+.msel label{display:grid;grid-template-columns:34px 1fr;align-items:center;gap:6px;font-size:10px;color:var(--dim)}
+.msel select{width:100%;min-width:0;font:11px monospace;padding:2px 4px;background:#02080f;color:var(--txt);border:1px solid var(--line);border-radius:0}
+.msel select:focus{outline:1px solid var(--neon)}
+.mem .n{font-size:13px}
+.msg b{display:inline-block;padding:0 6px;background:var(--c);color:#001;margin-right:4px}
+header h1{font-size:22px}
+#stop{padding:8px 14px}
 .add{color:#4ade80}.del{color:var(--bad)}
 .apv{margin:4px 0}
 .apv button{font:bold 12px monospace;padding:4px 10px;margin-right:6px;cursor:pointer;background:var(--neon);color:#001;border:0}
@@ -77,6 +83,7 @@ footer span{color:var(--dim)}footer b{color:var(--neon)}
 @media(max-width:900px){
  body{height:auto;overflow:auto}main{grid-template-columns:1fr}
  .room{min-height:170px}#logbox{min-height:420px}#team{display:none}}
+@media(max-width:600px){form{flex-wrap:wrap}#task{flex-basis:100%}header h1{font-size:18px}form button{flex:1}}
 </style></head><body>
 <header class="box"><h1>AI OFFICE <small>v1.0</small></h1><div id="flow"></div>
  <span id="clock">--:--</span></header>
@@ -111,7 +118,7 @@ const ROLES=Object.keys(R),col=r=>`var(--${r.toLowerCase()})`;
 const safe=(f,d)=>{try{return f()}catch{return d}};
 
 /* ---------- layout ---------- */
-$("mem").innerHTML=ROLES.map(r=>`<div class="mem" id="mem-${r}" style="--c:${col(r)}"><i class="av"></i><span class="n">${R[r].th}</span><span class="st">[IDLE]</span><div class="msel"><select data-role="${r}" data-kind="model" title="โมเดลงานปกติ"></select><select data-role="${r}" data-kind="hard_model" title="โมเดลงานยาก"></select></div></div>`).join("");
+$("mem").innerHTML=ROLES.map(r=>`<div class="mem" id="mem-${r}" style="--c:${col(r)}"><i class="av"></i><span class="n">${R[r].th}</span><span class="st">[IDLE]</span><div class="msel"><label>ปกติ<select data-role="${r}" data-kind="model"></select></label><label>ยาก<select data-role="${r}" data-kind="hard_model"></select></label></div></div>`).join("");
 $("rooms").innerHTML=ROLES.map(r=>`<div class="box room" id="${r}" style="--c:${col(r)}"><h2><span class="ttl">${R[r].room}</span><i class="dot"></i></h2>
 <div class="scene"><canvas width="96" height="64"></canvas><div class="mon"><div class="t idle">รอรับงาน…</div></div></div></div>`).join("");
 const STAGES=["BRIEF","PLAN","BUILD","REVIEW","REPORT"];

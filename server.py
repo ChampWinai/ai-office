@@ -131,7 +131,9 @@ def ask_api(p, system, messages):
         url = openai_url(base)
         body = {"model": p["model"], "stream": True, "messages": [{"role": "system", "content": system}] + messages}
         headers = {"Authorization": f"Bearer {p.get('api_key', '')}"}
-    req = urllib.request.Request(url, json.dumps(body).encode(), {"Content-Type": "application/json", **headers})
+    # Cloudflare-fronted APIs (e.g. Groq) reject the default "Python-urllib" agent, so identify the app instead
+    req = urllib.request.Request(url, json.dumps(body).encode(),
+                                 {"Content-Type": "application/json", "User-Agent": f"AIOffice/{VERSION} (+https://github.com/{REPO})", **headers})
     try:
         r = urllib.request.urlopen(req, timeout=600)
     except urllib.error.HTTPError as e:

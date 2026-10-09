@@ -73,6 +73,8 @@
 - **Anthropic-compatible**: ใส่ Base URL, Auth Token/API key และชื่อโมเดล เหมือนตั้ง `ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_MODEL` ของ Claude Code
 - **OpenAI-compatible**: ใช้ได้กับ OpenAI, DeepSeek, Groq, OpenRouter, LM Studio, vLLM ฯลฯ (Base URL ลงท้ายที่ `/v1` หรือไม่ก็ได้)
 
+มีตัวเลือกเร็วให้กรอกค่าอัตโนมัติ: **Groq**, **Google Gemini**, **OpenRouter** (โมเดลฟรี) ต้องใส่ API key ของคุณเองเท่านั้น
+
 ใช้โมเดลเดียวกันทุกตำแหน่ง กด **ทดสอบ** ก่อนบันทึกทุกครั้ง คีย์จะเก็บในไฟล์ `settings.json` ในเครื่องเท่านั้น และไม่ถูกส่งกลับไปที่หน้าเว็บ
 ไม่แนะนำให้ใส่คีย์ที่ใช้งานจริงลงในแชทหรือไฟล์ที่ใช้ร่วมกัน ถ้าคีย์หลุดแล้วควรยกเลิกและสร้างใหม่
 

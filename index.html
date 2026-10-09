@@ -138,6 +138,13 @@ dialog::backdrop{background:rgba(2,6,14,.6)}
 
 <dialog id="prov">
  <div class="lbl">ตั้งค่า AI</div>
+ <div class="fld"><label>ตัวเลือกเร็ว (กรอกให้อัตโนมัติ)</label>
+  <select id="pPreset">
+   <option value="">— เลือกผู้ให้บริการ —</option>
+   <option value="groq">Groq (เร็ว, ฟรี ไม่ต้องใส่บัตร)</option>
+   <option value="gemini">Google Gemini (โควตาฟรีน้อย)</option>
+   <option value="openrouter">OpenRouter (โมเดลฟรีที่ลงท้าย :free)</option>
+  </select></div>
  <div class="fld"><label>ประเภท</label>
   <select id="pType">
    <option value="ollama">Ollama (ในเครื่อง, ค่าเริ่มต้น)</option>
@@ -146,7 +153,8 @@ dialog::backdrop{background:rgba(2,6,14,.6)}
   </select></div>
  <div class="fld" id="pUrlF"><label>Base URL</label><input id="pUrl" placeholder="https://example.com/llm"></div>
  <div class="fld" id="pKeyF"><label>API key / Auth token</label><input id="pKey" type="password" autocomplete="off"></div>
- <div class="fld" id="pModelF"><label>ชื่อโมเดล (ใช้กับทุกตำแหน่ง)</label><input id="pModel" placeholder="เช่น Qwen3-Next"></div>
+ <div class="fld" id="pModelF"><label>ชื่อโมเดล (ใช้กับทุกตำแหน่ง)</label><input id="pModel" list="pModels" placeholder="เช่น Qwen3-Next"><datalist id="pModels"></datalist></div>
+ <div id="pHint" style="font-size:11px;color:var(--dim);margin:-4px 0 10px"></div>
  <div id="pMsg" class="mono" style="min-height:18px;font-size:12px;margin:2px 0 12px;white-space:pre-wrap;word-break:break-word"></div>
  <div style="display:flex;gap:8px;justify-content:flex-end;flex-wrap:wrap">
   <button class="btn ghost sm" id="pTest">ทดสอบ</button>
@@ -392,11 +400,26 @@ $("stop").onclick=()=>fetch("/stop",{method:"POST",body:"{}"});
 
 /* ---------- AI provider dialog ---------- */
 const pType=$("pType"),pUrl=$("pUrl"),pKey=$("pKey"),pModel=$("pModel"),pMsg=$("pMsg");
+const PRESETS={
+ groq:{type:"openai",base_url:"https://api.groq.com/openai/v1",model:"openai/gpt-oss-120b",
+  models:["openai/gpt-oss-120b","openai/gpt-oss-20b","meta-llama/llama-4-scout-17b-16e-instruct","qwen/qwen3-32b"],key:"console.groq.com/keys"},
+ gemini:{type:"openai",base_url:"https://generativelanguage.googleapis.com/v1beta/openai",model:"gemini-2.5-flash",
+  models:["gemini-2.5-flash","gemini-2.5-flash-lite"],key:"aistudio.google.com/apikey"},
+ openrouter:{type:"openai",base_url:"https://openrouter.ai/api/v1",model:"google/gemma-4-31b-it:free",
+  models:["google/gemma-4-31b-it:free","nvidia/nemotron-3-super-120b-a12b:free","poolside/laguna-s-2.1:free"],key:"openrouter.ai/keys"}
+};
+$("pPreset").onchange=()=>{
+ const k=$("pPreset").value;if(!k)return;const P=PRESETS[k];
+ pType.value=P.type;pUrl.value=P.base_url;pModel.value=P.model;
+ $("pModels").innerHTML=P.models.map(m=>`<option value="${esc(m)}">`).join("");
+ $("pHint").textContent="ขอ API key ได้ที่ "+P.key+" แล้ววางในช่องด้านล่าง";
+ toggleProv()};
 function toggleProv(){const api=pType.value!=="ollama";["pUrlF","pKeyF","pModelF"].forEach(id=>$(id).style.display=api?"grid":"none")}
 pType.onchange=toggleProv;
 $("provBtn").onclick=()=>{
  const p=CFG.provider||{type:"ollama"};
  pType.value=p.type;pUrl.value=p.base_url||"";pModel.value=p.model||"";pKey.value="";
+ $("pPreset").value="";$("pHint").textContent="";
  pKey.placeholder=p.has_key?"บันทึกไว้แล้ว (เว้นว่างเพื่อใช้ค่าเดิม)":"วาง API key หรือ Auth token";
  pMsg.textContent="";toggleProv();$("prov").showModal()};
 const provBody=()=>({type:pType.value,base_url:pUrl.value,model:pModel.value,api_key:pKey.value});

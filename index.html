@@ -112,6 +112,15 @@ footer{display:flex;gap:18px;align-items:center;padding:8px 16px;margin:0 10px 1
 footer span{color:var(--dim)}footer b{color:var(--neon)}
 .seg{display:inline-flex;gap:4px;vertical-align:middle}
 .seg i{width:18px;height:6px;border-radius:3px;background:#1b3350}.seg i.f{background:linear-gradient(90deg,var(--neon),var(--violet));box-shadow:0 0 8px #22d3ee88}
+#team.api .msel{display:none}
+#provBtn{display:flex;align-items:center;gap:6px;max-width:260px}
+#provLbl{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:190px}
+dialog{background:#0c1828;color:var(--txt);border:1px solid var(--line);border-radius:14px;padding:18px 20px;width:min(460px,92vw);box-shadow:0 20px 60px rgba(0,0,0,.6)}
+dialog::backdrop{background:rgba(2,6,14,.6)}
+.fld{display:grid;gap:4px;margin-bottom:10px}
+.fld label{font-size:11px;color:var(--dim)}
+.fld input,.fld select{width:100%;min-width:0;padding:9px 10px;border-radius:9px;border:1px solid var(--line);background:#040b16;color:var(--txt);font:13px "Segoe UI",sans-serif}
+.fld input:focus,.fld select:focus{outline:1px solid var(--neon)}
 @media(max-width:900px){
  body{height:auto;overflow:auto}main{grid-template-columns:1fr}
  .room{min-height:180px}#logbox{min-height:440px}#team{display:none}}
@@ -121,8 +130,30 @@ footer span{color:var(--dim)}footer b{color:var(--neon)}
 <header class="card top">
  <div class="brand"><div class="logo">AI</div><div><h1>AI OFFICE</h1><span class="ver" id="ver"></span></div></div>
  <div id="flow"></div>
- <span id="clock">--:--:--</span>
+ <div style="display:flex;align-items:center;gap:12px">
+  <button class="btn ghost sm" id="provBtn" title="ตั้งค่า AI">⚙ <span id="provLbl">Ollama (ในเครื่อง)</span></button>
+  <span id="clock">--:--:--</span>
+ </div>
 </header>
+
+<dialog id="prov">
+ <div class="lbl">ตั้งค่า AI</div>
+ <div class="fld"><label>ประเภท</label>
+  <select id="pType">
+   <option value="ollama">Ollama (ในเครื่อง, ค่าเริ่มต้น)</option>
+   <option value="anthropic">Anthropic-compatible (แบบ ANTHROPIC_BASE_URL + Auth Token)</option>
+   <option value="openai">OpenAI-compatible (OpenAI, DeepSeek, Groq, OpenRouter, LM Studio ฯลฯ)</option>
+  </select></div>
+ <div class="fld" id="pUrlF"><label>Base URL</label><input id="pUrl" placeholder="https://example.com/llm"></div>
+ <div class="fld" id="pKeyF"><label>API key / Auth token</label><input id="pKey" type="password" autocomplete="off"></div>
+ <div class="fld" id="pModelF"><label>ชื่อโมเดล (ใช้กับทุกตำแหน่ง)</label><input id="pModel" placeholder="เช่น Qwen3-Next"></div>
+ <div id="pMsg" class="mono" style="min-height:18px;font-size:12px;margin:2px 0 12px;white-space:pre-wrap;word-break:break-word"></div>
+ <div style="display:flex;gap:8px;justify-content:flex-end;flex-wrap:wrap">
+  <button class="btn ghost sm" id="pTest">ทดสอบ</button>
+  <button class="btn ghost sm" id="pCancel">ปิด</button>
+  <button class="btn sm" id="pSave">บันทึก</button>
+ </div>
+</dialog>
 
 <div class="banner info" id="updBox"><span class="bt" id="updMsg"></span><button class="btn sm" id="updBtn" hidden>อัปเดตทันที</button></div>
 <div class="banner warn" id="setupBanner"><div class="bt"><span id="setupMsg"></span><div class="bar" id="setupBar"><i id="setupFill"></i></div></div><button class="btn sm" id="setupBtn">ตั้งค่าอัตโนมัติ</button></div>
@@ -206,6 +237,12 @@ function buildOffice(){
  $("flow").innerHTML=STAGES.map(([k,t],i)=>`${i?"<em>›</em>":""}<span>${t}</span>`).join("");
  $("ag").textContent="0/"+ROLES.length;
  fillModels();
+ applyProvider();
+}
+function applyProvider(){
+ const p=CFG.provider||{type:"ollama"},api=p.type!=="ollama";
+ $("team").classList.toggle("api",api);
+ $("provLbl").textContent=api?`${p.type==="anthropic"?"Anthropic":"OpenAI"} · ${p.model}`:"Ollama (ในเครื่อง)";
 }
 function fillModels(){
  document.querySelectorAll("#mem select").forEach(sel=>{
@@ -295,7 +332,7 @@ function setupText(t){$("setupMsg").textContent=t}
 async function checkSetup(){
  const s=await fetch("/setup/status").then(r=>r.json()).catch(()=>null);
  const b=$("setupBanner");
- if(!s||(s.ollama&&!s.missing.length)){b.classList.remove("show");return}
+ if(!s||s.provider!=="ollama"||(s.ollama&&!s.missing.length)){b.classList.remove("show");return}
  b.classList.add("show");
  setupText(!s.ollama
   ? "ยังไม่พบ Ollama (โปรแกรมรันโมเดล AI ในเครื่อง) กดตั้งค่าอัตโนมัติเพื่อติดตั้งและดาวน์โหลดโมเดลที่ต้องใช้"
@@ -352,6 +389,30 @@ document.querySelector("form").onsubmit=async ev=>{
  $("ag").textContent="0/"+ROLES.length;$("go").disabled=false;$("stop").disabled=true;
 };
 $("stop").onclick=()=>fetch("/stop",{method:"POST",body:"{}"});
+
+/* ---------- AI provider dialog ---------- */
+const pType=$("pType"),pUrl=$("pUrl"),pKey=$("pKey"),pModel=$("pModel"),pMsg=$("pMsg");
+function toggleProv(){const api=pType.value!=="ollama";["pUrlF","pKeyF","pModelF"].forEach(id=>$(id).style.display=api?"grid":"none")}
+pType.onchange=toggleProv;
+$("provBtn").onclick=()=>{
+ const p=CFG.provider||{type:"ollama"};
+ pType.value=p.type;pUrl.value=p.base_url||"";pModel.value=p.model||"";pKey.value="";
+ pKey.placeholder=p.has_key?"บันทึกไว้แล้ว (เว้นว่างเพื่อใช้ค่าเดิม)":"วาง API key หรือ Auth token";
+ pMsg.textContent="";toggleProv();$("prov").showModal()};
+const provBody=()=>({type:pType.value,base_url:pUrl.value,model:pModel.value,api_key:pKey.value});
+async function provCall(path){
+ const r=await fetch(path,{method:"POST",body:JSON.stringify(provBody())});
+ const j=await r.json().catch(()=>({error:"ตอบกลับไม่ถูกต้อง"}));
+ if(!r.ok||j.error)throw new Error(j.error||"ผิดพลาด");
+ return j}
+$("pTest").onclick=async()=>{pMsg.textContent="กำลังทดสอบ…";
+ try{const j=await provCall("/provider/test");pMsg.textContent="✔ ตอบกลับ: "+j.reply}catch(err){pMsg.textContent="⚠ "+err.message}};
+$("pSave").onclick=async()=>{
+ try{await provCall("/provider");
+  CFG=await fetch("/config").then(r=>r.json());applyProvider();checkSetup();
+  pMsg.textContent="บันทึกแล้ว ✔";setTimeout(()=>$("prov").close(),500)
+ }catch(err){pMsg.textContent="⚠ "+err.message}};
+$("pCancel").onclick=()=>$("prov").close();
 
 /* ---------- start ---------- */
 (async function init(){

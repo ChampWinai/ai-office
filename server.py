@@ -1,6 +1,6 @@
 """AI Office: departments (plan -> build -> review) over Ollama, read/write files in a user-chosen workspace.
 Run: python server.py (web) or python office_app.py (desktop window)"""
-import difflib, hashlib, json, os, re, shutil, subprocess, sys, tempfile, threading, time, urllib.request
+import difflib, hashlib, json, os, re, shutil, subprocess, sys, tempfile, threading, time, urllib.error, urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -79,7 +79,95 @@ def ollama_tags():
 def config():
     keys = ("th", "room", "color", "hair", "phase", "model", "hard_model")
     return {"version": VERSION, "roles": {r: {k: c.get(k) for k in keys} for r, c in ROLES.items()},
-            "models": ollama_tags() or []}
+            "models": ollama_tags() or [], "provider": public_provider()}
+
+
+# ---------- AI provider: local Ollama, or an API (Anthropic-compatible / OpenAI-compatible) ----------
+
+def provider():
+    return CFG.get("provider") or {"type": "ollama"}
+
+
+def public_provider():
+    """What the page may see: never the key itself."""
+    p = provider()
+    return {"type": p["type"], "base_url": p.get("base_url", ""), "model": p.get("model", ""), "has_key": bool(p.get("api_key"))}
+
+
+def set_provider(body):
+    t = body.get("type", "ollama")
+    if t not in ("ollama", "anthropic", "openai"):
+        raise ValueError("ประเภทไม่รองรับ")
+    if t == "ollama":
+        CFG["provider"] = {"type": "ollama"}
+    else:
+        url = (body.get("base_url") or "").strip().rstrip("/")
+        model = (body.get("model") or "").strip()
+        if not re.match(r"https?://", url):
+            raise ValueError("Base URL ต้องขึ้นต้นด้วย http:// หรือ https://")
+        if not model:
+            raise ValueError("ใส่ชื่อโมเดล")
+        key = body.get("api_key") or provider().get("api_key", "")  # empty field keeps the saved key
+        CFG["provider"] = {"type": t, "base_url": url, "model": model, "api_key": key}
+    save_settings()
+
+
+def ask_api(p, system, messages):
+    """Stream text from an Anthropic-compatible or OpenAI-compatible endpoint (SSE, or plain JSON as fallback)."""
+    base = p["base_url"].rstrip("/")
+    base = base if base.endswith("/v1") else base + "/v1"
+    if p["type"] == "anthropic":
+        url = base + "/messages"
+        body = {"model": p["model"], "max_tokens": 4096, "stream": True, "system": system, "messages": messages}
+        headers = {"Authorization": f"Bearer {p.get('api_key', '')}", "anthropic-version": "2023-06-01"}  # Claude Code's ANTHROPIC_AUTH_TOKEN style
+    else:
+        url = base + "/chat/completions"
+        body = {"model": p["model"], "stream": True, "messages": [{"role": "system", "content": system}] + messages}
+        headers = {"Authorization": f"Bearer {p.get('api_key', '')}"}
+    req = urllib.request.Request(url, json.dumps(body).encode(), {"Content-Type": "application/json", **headers})
+    try:
+        r = urllib.request.urlopen(req, timeout=600)
+    except urllib.error.HTTPError as e:
+        raise RuntimeError(f"API ตอบ {e.code}: {e.read()[:200].decode('utf-8', 'replace')}") from None
+    with r:
+        if "json" in (r.headers.get("Content-Type") or ""):  # server ignored stream=true
+            data = json.load(r)
+            if p["type"] == "anthropic":
+                yield "".join(c.get("text", "") for c in data.get("content", []))
+            else:
+                yield data["choices"][0]["message"]["content"]
+            return
+        for raw in r:
+            line = raw.decode("utf-8", "replace").strip()
+            if not line.startswith("data:"):
+                continue
+            data = line[5:].strip()
+            if data == "[DONE]":
+                break
+            ev = json.loads(data)
+            if p["type"] == "anthropic":
+                if ev.get("type") == "error":
+                    raise RuntimeError(ev.get("error", {}).get("message", str(ev)))
+                if ev.get("type") == "content_block_delta" and ev.get("delta", {}).get("type") == "text_delta":
+                    yield ev["delta"]["text"]
+            else:
+                choices = ev.get("choices") or []
+                if choices:
+                    yield choices[0].get("delta", {}).get("content") or ""
+
+
+def test_provider(body):
+    t = body.get("type", "ollama")
+    if t == "ollama":
+        tags = ollama_tags()
+        if tags is None:
+            raise ValueError("Ollama ไม่ตอบ (ตรวจว่าเปิดอยู่)")
+        return f"Ollama พร้อม ({len(tags)} โมเดล)"
+    p = {"type": t, "base_url": (body.get("base_url") or provider().get("base_url", "")).strip().rstrip("/"),
+         "model": body.get("model") or provider().get("model", ""),
+         "api_key": body.get("api_key") or provider().get("api_key", "")}
+    out = "".join(ask_api(p, "Reply with one word: OK", [{"role": "user", "content": "ping"}]))
+    return out.strip()[:200] or "(ตอบว่าง)"
 
 
 # ---------- environment setup (Ollama + models) ----------
@@ -94,15 +182,20 @@ def needed(pull_hard):
 
 
 def setup_status():
+    if provider()["type"] != "ollama":  # API provider: nothing local to install
+        return {"provider": provider()["type"], "ollama": True, "winget": True, "missing": [], "missing_hard": []}
     tags = ollama_tags()
     have = set(tags or [])
-    return {"ollama": tags is not None, "winget": bool(shutil.which("winget")),
+    return {"provider": "ollama", "ollama": tags is not None, "winget": bool(shutil.which("winget")),
             "missing": [m for m in needed(False) if m not in have],
             "missing_hard": [m for m in needed(True) if m not in have and m not in needed(False)]}
 
 
 def setup_env(emit, pull_hard):
     """Install Ollama (winget, per-user, no admin), start it, pull the models the roles need."""
+    if provider()["type"] != "ollama":
+        emit(step="done", msg="ใช้ API ภายนอก ไม่ต้องติดตั้ง Ollama")
+        return
     if ollama_tags() is None:
         if not OLLAMA_EXE.exists() and not shutil.which("ollama"):
             if not shutil.which("winget"):
@@ -290,10 +383,16 @@ def apply_writes(plan):
 # ---------- the office ----------
 
 def ask(role, messages, hard=False):
-    """Yield text chunks from Ollama. hard=True picks the role's bigger model."""
+    """Yield text chunks from the active provider. hard=True picks the role's bigger model (Ollama only;
+    an API provider uses its one model for every role)."""
     cfg = ROLES[role]
+    system = (HERE / "rules.md").read_text(encoding="utf-8") + "\n" + cfg["prompt"]
+    p = provider()
+    if p["type"] != "ollama":
+        yield from ask_api(p, system, messages)
+        return
     body = {"model": cfg.get("hard_model", cfg["model"]) if hard else cfg["model"], "stream": True,
-            "messages": [{"role": "system", "content": (HERE / "rules.md").read_text(encoding="utf-8") + "\n" + cfg["prompt"]}] + messages}
+            "messages": [{"role": "system", "content": system}] + messages}
     req = urllib.request.Request(OLLAMA + "/api/chat", json.dumps(body).encode(), {"Content-Type": "application/json"})
     with urllib.request.urlopen(req, timeout=600) as r:
         for line in r:
@@ -445,6 +544,11 @@ class H(BaseHTTPRequestHandler):
             if self.path == "/models":
                 set_model(body["role"], body["kind"], body["name"])
                 return self.reply(200, {"ok": True})
+            if self.path == "/provider":
+                set_provider(body)
+                return self.reply(200, {"ok": True})
+            if self.path == "/provider/test":
+                return self.reply(200, {"reply": test_provider(body)})
             if self.path == "/stop":
                 CANCEL.set()
                 return self.reply(200, {"ok": True})

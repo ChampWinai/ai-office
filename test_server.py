@@ -61,6 +61,68 @@ def test_version_compare_and_no_install_from_source():
     raise AssertionError("install_update must refuse outside the packaged app")
 
 
+import http.server, json as _json, threading
+
+
+class _Fake(http.server.BaseHTTPRequestHandler):
+    """Tiny stand-in for an Anthropic-style and an OpenAI-style endpoint (SSE, plus a plain-JSON mode)."""
+    def do_POST(self):
+        req = _json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+        if self.headers.get("Authorization") != "Bearer k1":
+            self.send_response(401); self.end_headers(); self.wfile.write(b'{"error":"bad key"}'); return
+        if self.path.endswith("/v1/messages") and req.get("system"):
+            events = [{"type": "content_block_delta", "delta": {"type": "text_delta", "text": "คำ"}},
+                      {"type": "content_block_delta", "delta": {"type": "text_delta", "text": "ตอบ"}}]
+            self.send_response(200); self.send_header("Content-Type", "text/event-stream"); self.end_headers()
+            for e in events:
+                self.wfile.write(f"event: x\ndata: {_json.dumps(e)}\n\n".encode())
+        elif self.path.endswith("/v1/chat/completions"):
+            self.send_response(200); self.send_header("Content-Type", "text/event-stream"); self.end_headers()
+            for t in ["ok", "-openai"]:
+                self.wfile.write(f"data: {_json.dumps({'choices': [{'delta': {'content': t}}]})}\n\n".encode())
+            self.wfile.write(b"data: [DONE]\n\n")
+        else:
+            self.send_response(404); self.end_headers()
+    def log_message(self, *a): pass
+
+
+def _fake_base():
+    srv = http.server.HTTPServer(("127.0.0.1", 0), _Fake)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    return f"http://127.0.0.1:{srv.server_address[1]}/llm"
+
+
+def test_anthropic_stream_and_bad_key():
+    base = _fake_base()
+    p = {"type": "anthropic", "base_url": base, "model": "Qwen3-Next", "api_key": "k1"}
+    assert "".join(server.ask_api(p, "sys", [{"role": "user", "content": "hi"}])) == "คำตอบ"
+    try:
+        "".join(server.ask_api(dict(p, api_key="wrong"), "sys", [{"role": "user", "content": "hi"}]))
+    except RuntimeError as e:
+        assert "401" in str(e)
+        return
+    raise AssertionError("bad key should raise")
+
+
+def test_openai_stream_and_done_marker():
+    base = _fake_base()
+    p = {"type": "openai", "base_url": base, "model": "m", "api_key": "k1"}
+    assert "".join(server.ask_api(p, "sys", [{"role": "user", "content": "hi"}])) == "ok-openai"
+
+
+def test_provider_validation():
+    saved = dict(server.CFG)
+    try:
+        for bad in ({"type": "anthropic", "base_url": "ftp://x", "model": "m"}, {"type": "openai", "base_url": "https://x", "model": ""}, {"type": "nope"}):
+            try:
+                server.set_provider(bad)
+            except ValueError:
+                continue
+            raise AssertionError("should refuse " + str(bad))
+    finally:
+        server.CFG.clear(); server.CFG.update(saved)
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):

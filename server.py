@@ -1,6 +1,6 @@
 """AI Office: departments (plan -> build -> review) over Ollama, read/write files in a user-chosen workspace.
 Run: python server.py (web) or python office_app.py (desktop window)"""
-import difflib, hashlib, json, os, re, shutil, subprocess, sys, tempfile, threading, time, urllib.error, urllib.request
+import difflib, hashlib, json, os, re, shutil, subprocess, sys, tempfile, threading, time, urllib.error, urllib.parse, urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -112,16 +112,23 @@ def set_provider(body):
     save_settings()
 
 
+def openai_url(base):
+    """Use the base as typed (Groq .../openai/v1, Gemini .../v1beta/openai, LM Studio .../v1); only a bare host gets /v1."""
+    base = base.rstrip("/")
+    if urllib.parse.urlparse(base).path in ("", "/"):
+        base += "/v1"
+    return base + "/chat/completions"
+
+
 def ask_api(p, system, messages):
     """Stream text from an Anthropic-compatible or OpenAI-compatible endpoint (SSE, or plain JSON as fallback)."""
     base = p["base_url"].rstrip("/")
-    base = base if base.endswith("/v1") else base + "/v1"
     if p["type"] == "anthropic":
-        url = base + "/messages"
+        url = (base if base.endswith("/v1") else base + "/v1") + "/messages"
         body = {"model": p["model"], "max_tokens": 4096, "stream": True, "system": system, "messages": messages}
         headers = {"Authorization": f"Bearer {p.get('api_key', '')}", "anthropic-version": "2023-06-01"}  # Claude Code's ANTHROPIC_AUTH_TOKEN style
     else:
-        url = base + "/chat/completions"
+        url = openai_url(base)
         body = {"model": p["model"], "stream": True, "messages": [{"role": "system", "content": system}] + messages}
         headers = {"Authorization": f"Bearer {p.get('api_key', '')}"}
     req = urllib.request.Request(url, json.dumps(body).encode(), {"Content-Type": "application/json", **headers})

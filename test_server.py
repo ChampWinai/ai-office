@@ -110,6 +110,12 @@ def test_openai_stream_and_done_marker():
     assert "".join(server.ask_api(p, "sys", [{"role": "user", "content": "hi"}])) == "ok-openai"
 
 
+def test_openai_url_rules():
+    assert server.openai_url("https://api.groq.com/openai/v1") == "https://api.groq.com/openai/v1/chat/completions"
+    assert server.openai_url("https://generativelanguage.googleapis.com/v1beta/openai/") == "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
+    assert server.openai_url("http://localhost:1234") == "http://localhost:1234/v1/chat/completions"
+
+
 def test_provider_validation():
     saved = dict(server.CFG)
     try:

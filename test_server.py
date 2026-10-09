@@ -42,6 +42,25 @@ def test_plan_diff_apply():
         assert (Path(d) / "ok.py").read_text(encoding="utf-8") == "z = 3\n"
 
 
+
+
+def test_departments_and_setup_list():
+    phases = {n: c["phase"] for n, c in server.ROLES.items()}
+    assert phases["PLAN"] == "plan" and phases["SEC"] == "plan" and phases["DEV"] == "build" and phases["QA"] == "review"
+    assert all(c.get("hard_model") for c in server.ROLES.values())
+    assert set(server.needed(False)) <= set(server.needed(True))
+
+
+def test_version_compare_and_no_install_from_source():
+    assert server._ver("1.0.10") > server._ver("1.0.9")
+    assert server.FROZEN is False
+    try:
+        server.install_update(lambda **e: None)
+    except ValueError:
+        return
+    raise AssertionError("install_update must refuse outside the packaged app")
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):

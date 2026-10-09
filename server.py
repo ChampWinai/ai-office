@@ -1,9 +1,11 @@
-"""AI Office: BOSS -> DEV -> QA loop over Ollama, can read/write files in a user-chosen workspace.
-Run: python server.py  (web) or python office_app.py (desktop window)"""
-import difflib, json, os, re, shutil, subprocess, sys, tempfile, threading, time, urllib.request
+"""AI Office: departments (plan -> build -> review) over Ollama, read/write files in a user-chosen workspace.
+Run: python server.py (web) or python office_app.py (desktop window)"""
+import difflib, hashlib, json, os, re, shutil, subprocess, sys, tempfile, threading, time, urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+VERSION = os.environ.get("AIOFFICE_VERSION", "1.0.3")
+REPO = "ChampWinai/ai-office"
 FROZEN = getattr(sys, "frozen", False)
 HERE = Path(sys._MEIPASS) if FROZEN else Path(__file__).resolve().parent   # read-only resources
 DATA = Path(os.environ.get("APPDATA", HERE)) / "AIOffice" if FROZEN else HERE  # settings
@@ -11,8 +13,10 @@ DATA.mkdir(parents=True, exist_ok=True)
 SETTINGS = DATA / "settings.json"
 ROLES = json.load(open(HERE / "roles.json", encoding="utf-8"))
 OLLAMA = os.environ.get("OLLAMA", "http://localhost:11434")
+OLLAMA_EXE = Path(os.environ.get("LOCALAPPDATA", "")) / "Programs" / "Ollama" / "ollama.exe"
 PORT = int(os.environ.get("PORT", 8000))
 MAX_ROUNDS = 3
+NO_WINDOW = 0x08000000
 SKIP = {".git", "node_modules", "__pycache__", ".office_bak", "venv", ".venv", "dist", "build"}
 TEXT = {".py", ".js", ".ts", ".html", ".css", ".json", ".md", ".txt", ".cs", ".java", ".c", ".cpp", ".h", ".go", ".rs", ".sh", ".bat", ".yml", ".yaml", ".toml", ".sql", ".xml"}
 
@@ -32,11 +36,14 @@ _ws = CFG.get("workspace")
 WS = Path(_ws) if _ws and Path(_ws).is_dir() else None
 CANCEL, DECIDED = threading.Event(), threading.Event()  # Stop button, approve/reject buttons
 DECISION = [False]
+UPDATE = {}  # filled by a background check at startup
 
 
 class Cancelled(Exception):
     pass
 
+
+# ---------- settings & models ----------
 
 def save_settings():
     json.dump(CFG, open(SETTINGS, "w", encoding="utf-8"), ensure_ascii=False)
@@ -60,13 +67,140 @@ def set_model(role, kind, name):
     save_settings()
 
 
-def ollama_models():
+def ollama_tags():
+    """Installed model names, or None when Ollama is not answering."""
     try:
         with urllib.request.urlopen(OLLAMA + "/api/tags", timeout=3) as r:
             return [m["name"] for m in json.load(r)["models"]]
     except (OSError, ValueError, KeyError):
-        return []
+        return None
 
+
+def config():
+    keys = ("th", "room", "color", "hair", "phase", "model", "hard_model")
+    return {"version": VERSION, "roles": {r: {k: c.get(k) for k in keys} for r, c in ROLES.items()},
+            "models": ollama_tags() or []}
+
+
+# ---------- environment setup (Ollama + models) ----------
+
+def needed(pull_hard):
+    out = []
+    for c in ROLES.values():
+        out.append(c["model"])
+        if pull_hard and c.get("hard_model"):
+            out.append(c["hard_model"])
+    return list(dict.fromkeys(out))
+
+
+def setup_status():
+    tags = ollama_tags()
+    have = set(tags or [])
+    return {"ollama": tags is not None, "winget": bool(shutil.which("winget")),
+            "missing": [m for m in needed(False) if m not in have],
+            "missing_hard": [m for m in needed(True) if m not in have and m not in needed(False)]}
+
+
+def setup_env(emit, pull_hard):
+    """Install Ollama (winget, per-user, no admin), start it, pull the models the roles need."""
+    if ollama_tags() is None:
+        if not OLLAMA_EXE.exists() and not shutil.which("ollama"):
+            if not shutil.which("winget"):
+                raise RuntimeError("ไม่พบ winget (มีใน Windows 10/11) ติดตั้ง Ollama เองได้ที่ https://ollama.com/download")
+            emit(step="ollama", state="installing", msg="กำลังติดตั้ง Ollama (winget)…")
+            p = subprocess.run(["winget", "install", "-e", "--id", "Ollama.Ollama", "--silent",
+                                "--accept-package-agreements", "--accept-source-agreements"],
+                               capture_output=True, text=True)
+            if not OLLAMA_EXE.exists() and not shutil.which("ollama"):
+                raise RuntimeError(f"ติดตั้ง Ollama ไม่สำเร็จ (winget exit {p.returncode})")
+        exe = str(OLLAMA_EXE) if OLLAMA_EXE.exists() else "ollama"
+        emit(step="ollama", state="starting", msg="เปิด Ollama…")
+        subprocess.Popen([exe, "serve"], creationflags=NO_WINDOW, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        for _ in range(60):
+            if ollama_tags() is not None:
+                break
+            time.sleep(1)
+        else:
+            raise RuntimeError("Ollama เปิดไม่ขึ้นภายใน 60 วินาที")
+    emit(step="ollama", state="ok", msg="Ollama พร้อมแล้ว")
+    have = set(ollama_tags() or [])
+    for m in needed(pull_hard):
+        if m in have:
+            continue
+        emit(step="pull", model=m, pct=0, msg="ดาวน์โหลด")
+        req = urllib.request.Request(OLLAMA + "/api/pull", json.dumps({"name": m, "stream": True}).encode(),
+                                     {"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=3600) as r:
+            for line in r:
+                ev = json.loads(line)
+                if ev.get("error"):
+                    raise RuntimeError(f"ดาวน์โหลด {m} ไม่สำเร็จ: {ev['error']}")
+                if ev.get("total"):
+                    emit(step="pull", model=m, pct=round(ev.get("completed", 0) * 100 / ev["total"]), msg=ev.get("status", ""))
+        emit(step="pull", model=m, pct=100, msg="เสร็จ")
+    emit(step="done", msg="ตั้งค่าเสร็จแล้ว")
+
+
+# ---------- auto update (GitHub Releases) ----------
+
+def _ver(s):
+    return tuple(int(x) for x in re.findall(r"\d+", s)[:3])
+
+
+def check_update():
+    try:
+        req = urllib.request.Request(f"https://api.github.com/repos/{REPO}/releases/latest",
+                                     headers={"Accept": "application/vnd.github+json"})
+        rel = json.load(urllib.request.urlopen(req, timeout=8))
+        latest = rel["tag_name"].lstrip("v")
+        a = next((x for x in rel["assets"] if x["name"].endswith("-win64.zip")), None)
+        asset = a and {"url": a["browser_download_url"], "name": a["name"], "size": a["size"],
+                       "sha256": (a.get("digest") or "").split(":")[-1]}
+        return {"current": VERSION, "latest": latest, "frozen": FROZEN,
+                "available": bool(asset) and _ver(latest) > _ver(VERSION), "asset": asset}
+    except Exception as e:  # offline or rate-limited: the app just runs without the banner
+        return {"current": VERSION, "available": False, "error": str(e)}
+
+
+def download_update(asset, emit=None):
+    """Download the release zip, verify its sha256 against GitHub's digest, unpack. Returns the new app folder."""
+    if not asset.get("sha256"):
+        raise ValueError("ไม่มี checksum ของไฟล์ จึงไม่อัปเดต")
+    stage = Path(tempfile.mkdtemp(prefix="aioffice_upd_"))
+    zp = stage / asset["name"]
+    if emit:
+        emit(step="update", msg="ดาวน์โหลด " + asset["name"] + "…")
+    with urllib.request.urlopen(asset["url"], timeout=600) as r, open(zp, "wb") as f:
+        shutil.copyfileobj(r, f)
+    if hashlib.sha256(zp.read_bytes()).hexdigest() != asset["sha256"]:
+        shutil.rmtree(stage, ignore_errors=True)
+        raise ValueError("checksum ไม่ตรง ยกเลิกการอัปเดต")
+    shutil.unpack_archive(str(zp), str(stage))
+    new = stage / "AIOffice"
+    if not (new / "AIOffice.exe").exists():
+        raise ValueError("ไฟล์อัปเดตไม่ถูกต้อง")
+    return new
+
+
+def install_update(emit):
+    if not FROZEN:
+        raise ValueError("รันจากซอร์ส: อัปเดตด้วย git pull แทน")
+    if not UPDATE.get("available"):
+        raise ValueError("ไม่มีเวอร์ชันใหม่")
+    new = download_update(UPDATE["asset"], emit)
+    app = Path(sys.executable).parent
+    bat = Path(tempfile.gettempdir()) / "aioffice_update.bat"
+    bat.write_text(
+        "@echo off\r\nchcp 65001 >nul\r\ntimeout /t 3 /nobreak >nul\r\n"
+        f'robocopy "{new}" "{app}" /E /R:3 /W:1 /NFL /NDL /NJH /NJS >nul\r\n'
+        f'start "" "{app / "AIOffice.exe"}"\r\n'
+        f'rmdir /S /Q "{new.parent}"\r\n', encoding="utf-8")
+    subprocess.Popen(["cmd", "/c", str(bat)], creationflags=0x00000008 | 0x00000200, close_fds=True)  # detached
+    emit(step="update", state="restart", msg="กำลังเปิดเวอร์ชันใหม่…")
+    threading.Timer(1.5, lambda: os._exit(0)).start()  # the updater relaunches the app after we exit
+
+
+# ---------- workspace files ----------
 
 def passed(fb):  # last "VERDICT: X" anywhere wins; unparseable => FAIL
     v = re.findall(r"VERDICT:\s*\**\s*(PASS|FAIL)", fb, re.I)
@@ -153,6 +287,8 @@ def apply_writes(plan):
     return [p["path"] for p in plan]
 
 
+# ---------- the office ----------
+
 def ask(role, messages, hard=False):
     """Yield text chunks from Ollama. hard=True picks the role's bigger model."""
     cfg = ROLES[role]
@@ -197,8 +333,8 @@ def orchestrate(task, emit, approve=False):
     CANCEL.clear()  # one job at a time: the page disables RUN while a job runs
     DECIDED.clear()
 
-    def say(role, prompt):
-        emit(role=role, status="working")
+    def say(role, prompt, phase=None):
+        emit(role=role, status="working", phase=phase or ROLES[role].get("phase"))
         out = ""
         for tok in ask(role, [{"role": "user", "content": prompt}], hard):
             if CANCEL.is_set():
@@ -212,11 +348,18 @@ def orchestrate(task, emit, approve=False):
     hard = bool(re.search(r"LEVEL:\s*HARD", spec, re.I))
     emit(note="ระดับงาน: " + ("HARD → ใช้โมเดลใหญ่" if hard else "EASY"))
     wsctx = workspace_context(task, True)
+    notes = ""  # plan-phase departments think before anyone edits; their notes go to DEV
+    for name, cfg in ROLES.items():
+        if cfg.get("phase") == "plan":
+            out = say(name, f"Original request (authoritative):\n{task}\n\nSpec:\n{spec}{wsctx}"
+                            + (f"\n\nEarlier departments said:\n{notes}" if notes else ""))
+            notes += f"\n\n[{cfg['th']}]\n{out}"
     code, feedback, result, seen, ok = "", "", "", set(), False
     for rnd in range(MAX_ROUNDS):
         emit(round=rnd + 1)
         redo = f"\n\nPrevious code:\n{code}\n\nQA feedback:\n{feedback}\n\nRUN RESULT of previous code:\n{result}" if feedback else ""
-        code = say("DEV", f"Original request (authoritative, follow it exactly):\n{task}\n\nSpec:\n{spec}{wsctx}{redo}")
+        code = say("DEV", f"Original request (authoritative, follow it exactly):\n{task}\n\nSpec:\n{spec}"
+                          f"\n\nDepartment notes (follow the change plan and security rules):{notes}{wsctx}{redo}")
         cur = runnable(code)
         if cur and cur in seen:  # DEV resent identical code: escalate once, then give up
             if hard:
@@ -248,14 +391,17 @@ def orchestrate(task, emit, approve=False):
                 emit(note="ไม่เขียนไฟล์ (ไม่อนุมัติหรือหมดเวลา)")
         if plan and not declined:
             written = apply_writes(plan)
-            emit(note="เขียนไฟล์ลงโฟลเดอร์งาน: " + ", ".join(written) + " (สำรองของเดิมไว้ใน .office_bak)", files=written)
+            backed = " (สำรองของเดิมไว้ใน .office_bak)" if any(p["old"] for p in plan) else ""
+            emit(note="เขียนไฟล์ลงโฟลเดอร์งาน: " + ", ".join(written) + backed, files=written)
         elif not ok:
             emit(note="ไม่ผ่านการตรวจ จึงไม่เขียนไฟล์")
         elif not plan:
             emit(note="ผ่านแล้ว แต่ไม่ได้เขียนไฟล์: ไม่ทราบชื่อไฟล์ (ระบุชื่อไฟล์ในคำสั่ง เช่น hello.py)")
-    say("BOSS", f"สรุปผลให้ลูกค้า ผลตรวจ: {'ผ่าน' if ok else f'ไม่ผ่านหลัง {rnd + 1} รอบ'}\nQA:\n{feedback}\nCode:\n{code}")
+    say("BOSS", f"สรุปผลให้ลูกค้า ผลตรวจ: {'ผ่าน' if ok else f'ไม่ผ่านหลัง {rnd + 1} รอบ'}\nQA:\n{feedback}\nCode:\n{code}", phase="report")
     emit(done=ok)
 
+
+# ---------- HTTP ----------
 
 class H(BaseHTTPRequestHandler):
     def reply(self, code, obj, ctype="application/json"):
@@ -263,12 +409,28 @@ class H(BaseHTTPRequestHandler):
         self.send_response(code); self.send_header("Content-Type", ctype + "; charset=utf-8"); self.end_headers()
         self.wfile.write(data)
 
+    def stream(self, fn):
+        """NDJSON stream: one JSON event per line."""
+        self.send_response(200); self.send_header("Content-Type", "application/x-ndjson"); self.end_headers()
+        emit = lambda **e: (self.wfile.write((json.dumps(e, ensure_ascii=False) + "\n").encode()), self.wfile.flush())
+        try:
+            fn(emit)
+        except Cancelled:
+            emit(note="หยุดงานแล้ว")
+            emit(done=False)
+        except Exception as e:  # Ollama down, bad model name, bad path, client left...
+            try: emit(error=f"{type(e).__name__}: {e}")
+            except OSError: pass
+
     def do_GET(self):
         if self.path == "/workspace":
             return self.reply(200, {"path": str(WS) if WS else "", "files": workspace_files() if WS else []})
-        if self.path == "/models":
-            return self.reply(200, {"models": ollama_models(),
-                                    "roles": {r: {"model": c["model"], "hard_model": c.get("hard_model", c["model"])} for r, c in ROLES.items()}})
+        if self.path == "/config":
+            return self.reply(200, config())
+        if self.path == "/setup/status":
+            return self.reply(200, setup_status())
+        if self.path == "/update":
+            return self.reply(200, UPDATE)
         self.reply(200, open(HERE / "index.html", "rb").read(), "text/html")
 
     def do_POST(self):
@@ -292,21 +454,19 @@ class H(BaseHTTPRequestHandler):
                 return self.reply(200, {"ok": True})
         except Exception as e:
             return self.reply(400, {"error": str(e)})
-        self.send_response(200); self.send_header("Content-Type", "application/x-ndjson"); self.end_headers()
-        emit = lambda **e: (self.wfile.write((json.dumps(e, ensure_ascii=False) + "\n").encode()), self.wfile.flush())
-        try:
-            orchestrate(body["task"], emit, bool(body.get("approve")))  # NDJSON stream: one JSON event per line
-        except Cancelled:
-            emit(note="หยุดงานแล้ว")
-            emit(done=False)
-        except Exception as e:  # Ollama down, bad model name, bad path, client left...
-            try: emit(error=f"{type(e).__name__}: {e}")
-            except OSError: pass
+        if self.path == "/":
+            return self.stream(lambda emit: orchestrate(body["task"], emit, bool(body.get("approve"))))
+        if self.path == "/setup":
+            return self.stream(lambda emit: setup_env(emit, bool(body.get("pull_hard"))))
+        if self.path == "/update/install":
+            return self.stream(install_update)
+        self.reply(404, {"error": "not found"})
 
     def log_message(self, *a): pass
 
 
 def serve():
+    threading.Thread(target=lambda: UPDATE.update(check_update()), daemon=True).start()  # auto-check on start
     return ThreadingHTTPServer(("127.0.0.1", PORT), H)  # localhost only: this server can write files
 
 

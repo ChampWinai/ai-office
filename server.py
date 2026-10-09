@@ -1,6 +1,6 @@
 """AI Office: BOSS -> DEV -> QA loop over Ollama, can read/write files in a user-chosen workspace.
 Run: python server.py  (web) or python office_app.py (desktop window)"""
-import json, os, re, shutil, subprocess, sys, tempfile, time, urllib.request
+import difflib, json, os, re, shutil, subprocess, sys, tempfile, threading, time, urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -8,27 +8,64 @@ FROZEN = getattr(sys, "frozen", False)
 HERE = Path(sys._MEIPASS) if FROZEN else Path(__file__).resolve().parent   # read-only resources
 DATA = Path(os.environ.get("APPDATA", HERE)) / "AIOffice" if FROZEN else HERE  # settings
 DATA.mkdir(parents=True, exist_ok=True)
+SETTINGS = DATA / "settings.json"
 ROLES = json.load(open(HERE / "roles.json", encoding="utf-8"))
 OLLAMA = os.environ.get("OLLAMA", "http://localhost:11434")
 PORT = int(os.environ.get("PORT", 8000))
 MAX_ROUNDS = 3
-SETTINGS = DATA / "settings.json"
 SKIP = {".git", "node_modules", "__pycache__", ".office_bak", "venv", ".venv", "dist", "build"}
 TEXT = {".py", ".js", ".ts", ".html", ".css", ".json", ".md", ".txt", ".cs", ".java", ".c", ".cpp", ".h", ".go", ".rs", ".sh", ".bat", ".yml", ".yaml", ".toml", ".sql", ".xml"}
 
-try:
-    WS = Path(json.load(open(SETTINGS, encoding="utf-8"))["workspace"])
-    WS = WS if WS.is_dir() else None
-except (OSError, KeyError, ValueError):
-    WS = None
+
+def load_settings():
+    try:
+        return json.load(open(SETTINGS, encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
+CFG = load_settings()
+for _role, _over in CFG.get("models", {}).items():  # model picks from the web page override roles.json
+    if _role in ROLES:
+        ROLES[_role].update(_over)
+_ws = CFG.get("workspace")
+WS = Path(_ws) if _ws and Path(_ws).is_dir() else None
+CANCEL, DECIDED = threading.Event(), threading.Event()  # Stop button, approve/reject buttons
+DECISION = [False]
+
+
+class Cancelled(Exception):
+    pass
+
+
+def save_settings():
+    json.dump(CFG, open(SETTINGS, "w", encoding="utf-8"), ensure_ascii=False)
 
 
 def set_ws(path):
     global WS
-    WS = Path(path).expanduser().resolve()
-    if not WS.is_dir():
-        raise ValueError("ไม่พบโฟลเดอร์: " + str(WS))
-    json.dump({"workspace": str(WS)}, open(SETTINGS, "w", encoding="utf-8"))
+    p = Path(path).expanduser().resolve()
+    if not p.is_dir():
+        raise ValueError("ไม่พบโฟลเดอร์: " + str(p))
+    WS = p
+    CFG["workspace"] = str(p)
+    save_settings()
+
+
+def set_model(role, kind, name):
+    if role not in ROLES or kind not in ("model", "hard_model"):
+        raise ValueError("ตำแหน่งหรือประเภทโมเดลไม่ถูกต้อง")
+    ROLES[role][kind] = name
+    CFG.setdefault("models", {}).setdefault(role, {})[kind] = name
+    save_settings()
+
+
+def ollama_models():
+    try:
+        with urllib.request.urlopen(OLLAMA + "/api/tags", timeout=3) as r:
+            return [m["name"] for m in json.load(r)["models"]]
+    except (OSError, ValueError, KeyError):
+        return []
 
 
 def passed(fb):  # last "VERDICT: X" anywhere wins; unparseable => FAIL
@@ -78,26 +115,42 @@ def workspace_context(task, with_contents):
     return txt
 
 
-def write_files(reply, task):
-    """Write fences that carry path=...; refuse paths outside the workspace; back up what gets overwritten."""
+def plan_writes(reply, task):
+    """Files the reply wants to write (path=...). Refuses paths outside the workspace."""
     fs = fences(reply)
     named = re.search(r"[\w\-./]+\.(?:%s)\b" % "|".join(e[1:] for e in TEXT), task)  # filename mentioned in the request
     if named and fs and not any(f["path"] for f in fs):  # DEV forgot path=: use the first code block for that name
         fs[0]["path"] = named.group(0)
-    done = []
+    plan = []
     for f in fs:
         if not f["path"]:
             continue
         target = (WS / f["path"]).resolve()
         if not target.is_relative_to(WS.resolve()):
             raise ValueError("path อยู่นอกโฟลเดอร์งาน: " + f["path"])
-        if target.exists():
+        old = target.read_text(encoding="utf-8", errors="replace") if target.exists() else ""
+        plan.append({"path": f["path"], "target": target, "body": f["body"], "old": old})
+    return plan
+
+
+def diff_text(plan):
+    out = ""
+    for p in plan:
+        out += "".join(difflib.unified_diff(p["old"].splitlines(True), p["body"].splitlines(True),
+                                            f"a/{p['path']}" if p["old"] else "/dev/null", f"b/{p['path']}"))
+    return out[:4000]
+
+
+def apply_writes(plan):
+    """Write the planned files; the old version of each goes to .office_bak first."""
+    for p in plan:
+        t = p["target"]
+        if t.exists():
             (WS / ".office_bak").mkdir(exist_ok=True)
-            shutil.copy2(target, WS / ".office_bak" / f"{time.strftime('%H%M%S')}_{target.name}")
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(f["body"], encoding="utf-8")
-        done.append(f["path"])
-    return done
+            shutil.copy2(t, WS / ".office_bak" / f"{time.strftime('%H%M%S')}_{t.name}")
+        t.parent.mkdir(parents=True, exist_ok=True)
+        t.write_text(p["body"], encoding="utf-8")
+    return [p["path"] for p in plan]
 
 
 def ask(role, messages, hard=False):
@@ -129,13 +182,27 @@ def run_code(code):
             return "timeout 10s", False
 
 
-def orchestrate(task, emit):
+def wait_decision(timeout=300):
+    """Block until the page approves/rejects (or Stop is pressed, or it times out)."""
+    for _ in range(timeout):
+        if CANCEL.is_set():
+            raise Cancelled()
+        if DECIDED.wait(1):
+            return DECISION[0]
+    return False
+
+
+def orchestrate(task, emit, approve=False):
     hard = False
+    CANCEL.clear()  # one job at a time: the page disables RUN while a job runs
+    DECIDED.clear()
 
     def say(role, prompt):
         emit(role=role, status="working")
         out = ""
         for tok in ask(role, [{"role": "user", "content": prompt}], hard):
+            if CANCEL.is_set():
+                raise Cancelled()
             out += tok
             emit(role=role, token=tok)
         emit(role=role, status="done")
@@ -170,10 +237,22 @@ def orchestrate(task, emit):
         if ok:
             break
     if WS:
-        written = write_files(code, task) if ok else []
-        emit(note=("เขียนไฟล์ลงโฟลเดอร์งาน: " + ", ".join(written) + " (สำรองของเดิมไว้ใน .office_bak)") if written else
-             "ผ่านแล้ว แต่ไม่ได้เขียนไฟล์: ไม่ทราบชื่อไฟล์ (ระบุชื่อไฟล์ในคำสั่ง เช่น hello.py)" if ok else "ไม่ผ่านการตรวจ จึงไม่เขียนไฟล์",
-             files=written)
+        plan = plan_writes(code, task) if ok else []
+        declined = False
+        if plan:
+            emit(note="แก้ไขไฟล์: " + ", ".join(p["path"] for p in plan), diff=diff_text(plan))
+        if plan and approve:
+            emit(approve=True, files=[p["path"] for p in plan])
+            declined = not wait_decision()
+            if declined:
+                emit(note="ไม่เขียนไฟล์ (ไม่อนุมัติหรือหมดเวลา)")
+        if plan and not declined:
+            written = apply_writes(plan)
+            emit(note="เขียนไฟล์ลงโฟลเดอร์งาน: " + ", ".join(written) + " (สำรองของเดิมไว้ใน .office_bak)", files=written)
+        elif not ok:
+            emit(note="ไม่ผ่านการตรวจ จึงไม่เขียนไฟล์")
+        elif not plan:
+            emit(note="ผ่านแล้ว แต่ไม่ได้เขียนไฟล์: ไม่ทราบชื่อไฟล์ (ระบุชื่อไฟล์ในคำสั่ง เช่น hello.py)")
     say("BOSS", f"สรุปผลให้ลูกค้า ผลตรวจ: {'ผ่าน' if ok else f'ไม่ผ่านหลัง {rnd + 1} รอบ'}\nQA:\n{feedback}\nCode:\n{code}")
     emit(done=ok)
 
@@ -187,6 +266,9 @@ class H(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path == "/workspace":
             return self.reply(200, {"path": str(WS) if WS else "", "files": workspace_files() if WS else []})
+        if self.path == "/models":
+            return self.reply(200, {"models": ollama_models(),
+                                    "roles": {r: {"model": c["model"], "hard_model": c.get("hard_model", c["model"])} for r, c in ROLES.items()}})
         self.reply(200, open(HERE / "index.html", "rb").read(), "text/html")
 
     def do_POST(self):
@@ -194,16 +276,29 @@ class H(BaseHTTPRequestHandler):
         if self.headers.get("Origin") not in (None, f"http://localhost:{PORT}", f"http://127.0.0.1:{PORT}"):
             return self.reply(403, {"error": "forbidden origin"})
         body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
-        if self.path == "/workspace":
-            try:
+        try:
+            if self.path == "/workspace":
                 set_ws(body["path"])
                 return self.reply(200, {"path": str(WS), "files": workspace_files()})
-            except Exception as e:
-                return self.reply(400, {"error": str(e)})
+            if self.path == "/models":
+                set_model(body["role"], body["kind"], body["name"])
+                return self.reply(200, {"ok": True})
+            if self.path == "/stop":
+                CANCEL.set()
+                return self.reply(200, {"ok": True})
+            if self.path == "/decide":
+                DECISION[0] = bool(body.get("ok"))
+                DECIDED.set()
+                return self.reply(200, {"ok": True})
+        except Exception as e:
+            return self.reply(400, {"error": str(e)})
         self.send_response(200); self.send_header("Content-Type", "application/x-ndjson"); self.end_headers()
         emit = lambda **e: (self.wfile.write((json.dumps(e, ensure_ascii=False) + "\n").encode()), self.wfile.flush())
         try:
-            orchestrate(body["task"], emit)  # NDJSON stream: one JSON event per line
+            orchestrate(body["task"], emit, bool(body.get("approve")))  # NDJSON stream: one JSON event per line
+        except Cancelled:
+            emit(note="หยุดงานแล้ว")
+            emit(done=False)
         except Exception as e:  # Ollama down, bad model name, bad path, client left...
             try: emit(error=f"{type(e).__name__}: {e}")
             except OSError: pass

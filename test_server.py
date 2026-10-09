@@ -76,7 +76,7 @@ class _Fake(http.server.BaseHTTPRequestHandler):
             self.send_response(200); self.send_header("Content-Type", "text/event-stream"); self.end_headers()
             for e in events:
                 self.wfile.write(f"event: x\ndata: {_json.dumps(e)}\n\n".encode())
-        elif self.path.endswith("/v1/chat/completions"):
+        elif self.path.endswith("/chat/completions"):
             self.send_response(200); self.send_header("Content-Type", "text/event-stream"); self.end_headers()
             for t in ["ok", "-openai"]:
                 self.wfile.write(f"data: {_json.dumps({'choices': [{'delta': {'content': t}}]})}\n\n".encode())

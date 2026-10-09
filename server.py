@@ -144,10 +144,15 @@ def ask_api(p, system, messages):
     # Cloudflare-fronted APIs (e.g. Groq) reject the default "Python-urllib" agent, so identify the app instead
     req = urllib.request.Request(url, json.dumps(body).encode(),
                                  {"Content-Type": "application/json", "User-Agent": f"AIOffice/{VERSION} (+https://github.com/{REPO})", **headers})
-    try:
-        r = urllib.request.urlopen(req, timeout=600)
-    except urllib.error.HTTPError as e:
-        raise RuntimeError(f"API ตอบ {e.code}: {e.read()[:200].decode('utf-8', 'replace')}") from None
+    for attempt in range(4):  # rate limits and "high demand" (429/5xx) are usually temporary: back off and retry
+        try:
+            r = urllib.request.urlopen(req, timeout=600)
+            break
+        except urllib.error.HTTPError as e:
+            if e.code in (429, 500, 502, 503, 504) and attempt < 3:
+                time.sleep(5 * 2 ** attempt)
+                continue
+            raise RuntimeError(f"API ตอบ {e.code}: {e.read()[:200].decode('utf-8', 'replace')}") from None
     with r:
         if "json" in (r.headers.get("Content-Type") or ""):  # server ignored stream=true
             data = json.load(r)

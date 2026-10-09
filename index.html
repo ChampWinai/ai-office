@@ -247,10 +247,24 @@ function buildOffice(){
  fillModels();
  applyProvider();
 }
+function providerName(p){
+ const u=p.base_url||"";
+ if(p.type==="anthropic")return "Anthropic";
+ if(/googleapis/.test(u))return "Gemini";
+ if(/groq/.test(u))return "Groq";
+ if(/openrouter/.test(u))return "OpenRouter";
+ return "OpenAI-compatible";
+}
 function applyProvider(){
  const p=CFG.provider||{type:"ollama"},api=p.type!=="ollama";
  $("team").classList.toggle("api",api);
- $("provLbl").textContent=api?`${p.type==="anthropic"?"Anthropic":"OpenAI"} · ${p.model}`:"Ollama (ในเครื่อง)";
+ $("provLbl").textContent=api?`${providerName(p)} · ${p.model}`:"Ollama (ในเครื่อง)";
+}
+function errHint(){
+ const p=CFG.provider||{type:"ollama"};
+ return p.type!=="ollama"
+  ? `${providerName(p)}: ตรวจ API key, Base URL, ชื่อโมเดล และโควตา (⚙ AI) ถ้าขึ้น 503/429 คือผู้ให้บริการยุ่งหรือโควตาเต็ม ลองใหม่ภายหลัง`
+  : 'ตรวจว่า Ollama รันอยู่ และชื่อโมเดลถูกต้อง (กด "ตั้งค่าอัตโนมัติ" ด้านบนได้)';
 }
 function fillModels(){
  document.querySelectorAll("#mem select").forEach(sel=>{
@@ -292,7 +306,7 @@ function newMsg(role){
 /* ---------- job events ---------- */
 function handle(e){
  const log=$("log");
- if(e.error){log.insertAdjacentHTML("beforeend",`<div class="msg err"><span class="fail">⚠ ${esc(e.error)}</span><br><small>ตรวจว่า Ollama รันอยู่ และชื่อโมเดลถูกต้อง (กด "ตั้งค่าอัตโนมัติ" ด้านบนได้)</small></div>`);$("sys").textContent="ERROR";return}
+ if(e.error){log.insertAdjacentHTML("beforeend",`<div class="msg err"><span class="fail">⚠ ${esc(e.error)}</span><br><small>${esc(errHint())}</small></div>`);$("sys").textContent="ERROR";return}
  if(e.approve){
   const d=document.createElement("div");d.className="apv";
   d.innerHTML='<button data-ok="1">อนุมัติเขียนไฟล์</button><button data-ok="0">ไม่อนุมัติ</button>';

@@ -7,7 +7,7 @@ from pathlib import Path
 import edits as E
 import extras as X
 
-VERSION = os.environ.get("AIOFFICE_VERSION", "1.0.3")
+VERSION = os.environ.get("AIOFFICE_VERSION", "1.1.0")
 REPO = "ChampWinai/ai-office"
 FROZEN = getattr(sys, "frozen", False)
 HERE = Path(sys._MEIPASS) if FROZEN else Path(__file__).resolve().parent   # read-only resources

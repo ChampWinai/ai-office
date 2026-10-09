@@ -84,8 +84,16 @@ def config():
 
 # ---------- AI provider: local Ollama, or an API (Anthropic-compatible / OpenAI-compatible) ----------
 
+def key_host(url):
+    return urllib.parse.urlparse(url).netloc
+
+
 def provider():
-    return CFG.get("provider") or {"type": "ollama"}
+    """Active provider; its key is looked up by host, so switching presets keeps each key."""
+    p = dict(CFG.get("provider") or {"type": "ollama"})
+    if p["type"] != "ollama":
+        p["api_key"] = (CFG.get("keys") or {}).get(key_host(p.get("base_url", "")), "")
+    return p
 
 
 def public_provider():
@@ -107,8 +115,10 @@ def set_provider(body):
             raise ValueError("Base URL ต้องขึ้นต้นด้วย http:// หรือ https://")
         if not model:
             raise ValueError("ใส่ชื่อโมเดล")
-        key = body.get("api_key") or provider().get("api_key", "")  # empty field keeps the saved key
-        CFG["provider"] = {"type": t, "base_url": url, "model": model, "api_key": key}
+        key = (body.get("api_key") or "").strip()
+        if key:  # a new key replaces the saved one for this host; an empty field keeps it
+            CFG.setdefault("keys", {})[key_host(url)] = key
+        CFG["provider"] = {"type": t, "base_url": url, "model": model}
     save_settings()
 
 
@@ -172,9 +182,9 @@ def test_provider(body):
         if tags is None:
             raise ValueError("Ollama ไม่ตอบ (ตรวจว่าเปิดอยู่)")
         return f"Ollama พร้อม ({len(tags)} โมเดล)"
-    p = {"type": t, "base_url": (body.get("base_url") or provider().get("base_url", "")).strip().rstrip("/"),
-         "model": body.get("model") or provider().get("model", ""),
-         "api_key": body.get("api_key") or provider().get("api_key", "")}
+    url = (body.get("base_url") or provider().get("base_url", "")).strip().rstrip("/")
+    p = {"type": t, "base_url": url, "model": body.get("model") or provider().get("model", ""),
+         "api_key": (body.get("api_key") or "").strip() or (CFG.get("keys") or {}).get(key_host(url), "")}
     out = "".join(ask_api(p, "Reply with one word: OK", [{"role": "user", "content": "ping"}]))
     return out.strip()[:200] or "(ตอบว่าง)"
 

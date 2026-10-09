@@ -20,7 +20,7 @@ from pathlib import Path
 FENCE = re.compile(r"```([^\n`]*)\n(.*?)```", re.S)
 EDIT = re.compile(r"FILE:\s*`?([^\n`]+?)`?\s*\n<<<<<<< SEARCH\n(.*?)\n?=======\n(.*?)\n?>>>>>>> REPLACE", re.S)
 CMD = re.compile(r"^[ \t]*(DELETE|RENAME|RUN):[ \t]*(.+?)[ \t]*$", re.M)
-TOOL = re.compile(r"^[ \t]*(SEARCH|READ|LIST):[ \t]*(.+?)[ \t]*$", re.M)
+TOOL = re.compile(r"^[ \t]*(SEARCH|READ|LIST|WEB|FETCH|MCP):[ \t]*(.+?)[ \t]*$", re.M)
 IGNORE_DIRS = {".git", "node_modules", "__pycache__", ".office_bak", "venv", ".venv", "dist", "build",
                ".pytest_cache", ".mypy_cache", ".ruff_cache", ".tox", ".idea", ".vscode"}
 TEXT = {".py", ".js", ".mjs", ".cjs", ".ts", ".tsx", ".jsx", ".html", ".css", ".scss", ".json", ".md", ".txt", ".cs",
@@ -161,6 +161,9 @@ def fences(text):
             m = re.match(r"\s*(?:#\s*)?path=(\S+)[^\n]*\n", body)
             body = body[m.end():] if m else body
         out.append({"lang": (info.split() or [""])[0].lower(), "path": m.group(1).strip("\"'`") if m else None, "body": body})
+    for i, f in enumerate(out[:-1]):  # an empty block holding only "path=x" followed by the code in its own block
+        if f["path"] and not f["body"].strip() and not out[i + 1]["path"]:
+            out[i + 1]["path"], f["path"] = f["path"], None
     return out
 
 
@@ -204,6 +207,8 @@ def apply_ops(root, ops):
                 dst.parent.mkdir(parents=True, exist_ok=True)
                 shutil.move(str(t), str(dst))
             elif op["kind"] == "write":
+                if not op["body"].strip() and t.is_file() and t.stat().st_size:
+                    raise EditError(f"{op['path']}: เนื้อหาว่าง จึงไม่เขียนทับ (ถ้าต้องการลบไฟล์ให้ใช้ DELETE:)")
                 enc, nl = (read_text(t)[1:] if t.is_file() else ("utf-8", "\n"))
                 write_text(t, op["body"], enc, nl)
             else:
@@ -283,27 +288,112 @@ def run_cmds(root, cmds, timeout=120):
     return "\n".join(out)
 
 
+# ---------- checks for every language ----------
+
+# extension -> (program, args before the file). Syntax-only checks that need no project setup: a failure blocks the write.
+STRICT = {".js": ("node", ["--check"]), ".mjs": ("node", ["--check"]), ".cjs": ("node", ["--check"]),
+          ".php": ("php", ["-l"]), ".rb": ("ruby", ["-c"]), ".go": ("gofmt", ["-e", "-l"]), ".lua": ("luac", ["-p"])}
+# Checks that may fail for reasons outside the change (missing headers or packages): reported to QA as warnings only.
+LOOSE = {".sh": ("bash", ["-n"]), ".c": ("gcc", ["-fsyntax-only"]), ".cpp": ("g++", ["-fsyntax-only"]),
+         ".cc": ("g++", ["-fsyntax-only"]), ".h": ("gcc", ["-fsyntax-only"])}
+# (extensions, marker files, command) - whole-project compile checks, once per job, warnings only
+PROJECT = [({".ts", ".tsx"}, ("tsconfig.json",), ["tsc", "--noEmit", "-p", "."]),
+           ({".rs"}, ("Cargo.toml",), ["cargo", "check", "-q"]),
+           ({".go"}, ("go.mod",), ["go", "vet", "./..."]),
+           ({".cs"}, ("*.csproj", "*.sln"), ["dotnet", "build", "--nologo", "-v", "q"]),
+           ({".java"}, ("pom.xml",), ["mvn", "-q", "-o", "compile"]),
+           ({".kt", ".java"}, ("gradlew.bat", "gradlew"), ["gradlew", "-q", "compileJava"])]
+
+
+def program(name, root=None):
+    """A program on PATH, or the project's own node_modules/.bin or wrapper copy."""
+    if root:
+        for cand in (Path(root) / "node_modules" / ".bin" / (name + ".cmd"), Path(root) / "node_modules" / ".bin" / name,
+                     Path(root) / (name + ".bat"), Path(root) / name):
+            if cand.is_file():
+                return str(cand)
+    return shutil.which(name)
+
+
+def _run(cmd, cwd, timeout=60):
+    try:
+        r = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, errors="replace", timeout=timeout)
+        return r.returncode, (r.stdout + r.stderr).strip()
+    except subprocess.TimeoutExpired:
+        return 1, f"timeout {timeout}s"
+
+
+def check_file(root, rel, pyexe):
+    """(status, message): status is "ok", "error" (blocks the write), "warn" (for QA only) or "skip"."""
+    p = Path(root) / rel
+    ext = p.suffix.lower()
+    try:
+        if ext == ".py":
+            if not pyexe:
+                return "skip", "ไม่มี Python"
+            code, out = _run([pyexe, "-I", "-m", "py_compile", str(p)], root)
+            return ("error", out[-300:]) if code else ("ok", "")
+        if ext == ".json":
+            json.loads(read_text(p)[0])
+        elif ext == ".toml":
+            import tomllib
+            tomllib.loads(read_text(p)[0])
+        elif ext in (".xml", ".csproj", ".props", ".config", ".xaml"):
+            import xml.etree.ElementTree as ET
+            ET.fromstring(read_text(p)[0].encode("utf-8"))
+        elif ext in (".yml", ".yaml"):
+            try:
+                import yaml
+            except ImportError:
+                return "skip", "ไม่มี PyYAML"
+            list(yaml.safe_load_all(read_text(p)[0]))
+        elif ext == ".ps1":
+            ps = shutil.which("powershell") or shutil.which("pwsh")
+            if not ps:
+                return "skip", "ไม่มี PowerShell"
+            script = ("$e=$null;[void][System.Management.Automation.Language.Parser]::ParseFile('%s',[ref]$null,[ref]$e);"
+                      "if($e){$e|%%{$_.Message};exit 1}" % str(p).replace("'", "''"))
+            code, out = _run([ps, "-NoProfile", "-NonInteractive", "-Command", script], root)
+            return ("warn", out[-300:]) if code else ("ok", "")
+        elif ext in STRICT or ext in LOOSE:
+            prog, args = STRICT.get(ext) or LOOSE[ext]
+            exe = program(prog, root)
+            if not exe:
+                return "skip", f"ไม่มี {prog} ในเครื่อง"
+            code, out = _run([exe, *args, str(p)], root)
+            if ext == ".go" and not code and out:  # gofmt -l lists files that only need formatting
+                return "ok", ""
+            return (("error" if ext in STRICT else "warn"), out[-300:]) if code else ("ok", "")
+        else:
+            return "skip", ""
+        return "ok", ""
+    except (ValueError, SyntaxError) as e:  # json/toml/xml/yaml parse errors
+        return "error", str(e)[:300]
+    except Exception as e:  # e.g. yaml.YAMLError
+        return "error", f"{type(e).__name__}: {str(e)[:300]}"
+
+
 def run_checks(root, changed, test_cmd, pyexe):
-    """Syntax checks for changed files (never executes them) and the project's own test command if set."""
+    """Per-file syntax checks for every language we know (never executes the project's code), whole-project
+    compile checks as warnings, then the project's own test command if set (must exit 0)."""
     report, ok = [], True
     for rel in changed:
-        p = Path(root) / rel
-        if rel.endswith(".py") and pyexe:
-            r = subprocess.run([pyexe, "-I", "-m", "py_compile", str(p)], capture_output=True, text=True, errors="replace", timeout=30)
-            if r.returncode:
-                ok = False
-                report.append(f"syntax {rel}: " + (r.stderr or r.stdout)[-300:])
-        elif rel.endswith(".json"):
-            try:
-                json.loads(read_text(p)[0])
-            except ValueError as e:
-                ok = False
-                report.append(f"syntax {rel}: {e}")
-        elif rel.endswith((".js", ".mjs", ".cjs")) and shutil.which("node"):
-            r = subprocess.run(["node", "--check", str(p)], capture_output=True, text=True, errors="replace", timeout=30)
-            if r.returncode:
-                ok = False
-                report.append(f"syntax {rel}: " + (r.stderr or r.stdout)[-300:])
+        status, msg = check_file(root, rel, pyexe)
+        if status == "error":
+            ok = False
+            report.append(f"syntax {rel}: {msg}")
+        elif status == "warn":
+            report.append(f"warning {rel}: {msg}")
+        elif status == "skip" and msg:
+            report.append(f"(ข้ามการตรวจ {rel}: {msg})")
+    exts = {Path(c).suffix.lower() for c in changed}
+    for kinds, markers, cmd in PROJECT:
+        if exts & kinds and any(list(Path(root).glob(m)) for m in markers):
+            exe = program(cmd[0], root)
+            if exe:
+                code, out = _run([exe, *cmd[1:]], root, timeout=300)
+                if code:
+                    report.append(f"warning `{' '.join(cmd)}` exit={code}\n{out[-800:]}")
     if test_cmd:
         try:
             r = subprocess.run(test_cmd, shell=True, cwd=root, capture_output=True, text=True, errors="replace", timeout=300)
@@ -313,6 +403,40 @@ def run_checks(root, changed, test_cmd, pyexe):
             ok = False
             report.append(f"tests `{test_cmd}`: timeout 300s")
     return ("\n".join(report) or "ไม่มีการตรวจเพิ่มเติม"), ok
+
+
+def detect_test_cmd(ws):
+    """A test command guessed from the project's build files (the user still saves it)."""
+    ws = Path(ws)
+    if (ws / "package.json").is_file():
+        try:
+            test = json.loads(read_text(ws / "package.json")[0]).get("scripts", {}).get("test", "")
+        except ValueError:
+            test = ""
+        if test and "no test specified" not in test:
+            return "npm test --silent"
+    if (ws / "Cargo.toml").is_file():
+        return "cargo test -q"
+    if (ws / "go.mod").is_file():
+        return "go test ./..."
+    if list(ws.glob("*.sln")) or list(ws.glob("*.csproj")):
+        return "dotnet test --nologo"
+    if (ws / "pom.xml").is_file():
+        return "mvn -q test"
+    if (ws / "gradlew.bat").is_file() or (ws / "gradlew").is_file():
+        return "gradlew test -q"
+    if (ws / "composer.json").is_file() and (ws / "vendor" / "bin" / "phpunit").exists():
+        return "vendor/bin/phpunit"
+    if (ws / "Gemfile").is_file() and (ws / "spec").is_dir():
+        return "bundle exec rspec"
+    py_tests = list(ws.glob("test_*.py")) + list(ws.glob("tests/test_*.py")) + list(ws.glob("tests/**/test_*.py"))
+    if py_tests:
+        uses_pytest = shutil.which("pytest") or "pytest" in "".join(
+            read_text(f)[0] for f in (ws / "pyproject.toml", ws / "requirements.txt", ws / "setup.cfg", ws / "pytest.ini") if f.is_file())
+        if uses_pytest:
+            return "python -m pytest -q"
+        return "python -m unittest discover -q" + (" -s tests -t ." if (ws / "tests").is_dir() and not list(ws.glob("test_*.py")) else "")
+    return ""
 
 
 def diff_for(ws, root, changed, deleted=(), limit=8000):

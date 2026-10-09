@@ -115,6 +115,12 @@ footer span{color:var(--dim)}footer b{color:var(--neon)}
 .seg{display:inline-flex;gap:4px;vertical-align:middle}
 .seg i{width:18px;height:6px;border-radius:3px;background:#1b3350}.seg i.f{background:linear-gradient(90deg,var(--neon),var(--violet));box-shadow:0 0 8px #22d3ee88}
 #team.api .msel{display:none}
+.chip{display:inline-flex;align-items:center;gap:6px;padding:3px 9px;margin:0 6px 6px 0;border-radius:999px;border:1px solid var(--line);background:#0b1a2e;font-size:11px}
+.chip a{cursor:pointer;color:var(--bad)}
+#attList{flex-basis:100%;display:flex;flex-wrap:wrap}
+#attList:empty{display:none}
+.fld textarea{width:100%;min-height:110px;padding:9px 10px;border-radius:9px;border:1px solid var(--line);background:#040b16;color:var(--txt);font:12px Consolas,monospace}
+.row2{display:grid;grid-template-columns:1fr 1fr;gap:8px}
 #provBtn{display:flex;align-items:center;gap:6px;max-width:260px}
 #provLbl{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:190px}
 dialog{background:#0c1828;color:var(--txt);border:1px solid var(--line);border-radius:14px;padding:18px 20px;width:min(460px,92vw);box-shadow:0 20px 60px rgba(0,0,0,.6)}
@@ -169,7 +175,27 @@ dialog::backdrop{background:rgba(2,6,14,.6)}
 <div class="banner warn" id="setupBanner"><div class="bt"><span id="setupMsg"></span><div class="bar" id="setupBar"><i id="setupFill"></i></div></div><button class="btn sm" id="setupBtn">ตั้งค่าอัตโนมัติ</button></div>
 
 <div class="card" id="wsbar"><span class="lbl">📁 โฟลเดอร์งาน</span><span id="wspath">ยังไม่ได้เลือก (โค้ดแสดงอย่างเดียว ไม่เขียนไฟล์)</span><button class="btn ghost sm" id="wsbtn">เลือกโฟลเดอร์</button></div>
-<div class="card" id="cmdbar" style="display:flex;align-items:center;gap:10px;margin:8px 10px 0;padding:6px 14px"><span class="lbl" style="margin:0">🧪 คำสั่งทดสอบ</span><input id="testCmd" placeholder="เช่น python -m unittest  (เว้นว่างได้ ระบบจะเช็ก syntax อย่างเดียว)" style="flex:1;min-width:0;padding:6px 10px;background:#040b16;color:var(--txt);border:1px solid var(--line);border-radius:9px;font:12px Consolas,monospace"><button class="btn ghost sm" id="testSave">บันทึก</button><button class="btn ghost sm" id="undoBtn" title="ย้อนการเขียนไฟล์ครั้งล่าสุด">↶ ย้อนการแก้ไขล่าสุด</button><label class="ap" title="หลังเขียนไฟล์ ให้ git commit เฉพาะไฟล์ที่แก้ (ถ้าอยู่บน main/master จะสร้าง branch ใหม่ก่อน)"><input type="checkbox" id="gitCommit">git commit อัตโนมัติ</label><span id="gitInfo" style="font-size:11px;color:var(--dim);white-space:nowrap"></span></div>
+<div class="card" id="cmdbar" style="display:flex;align-items:center;gap:10px;margin:8px 10px 0;padding:6px 14px"><span class="lbl" style="margin:0">🧪 คำสั่งทดสอบ</span><input id="testCmd" placeholder="เช่น python -m unittest  (เว้นว่างได้ ระบบจะเช็ก syntax อย่างเดียว)" style="flex:1;min-width:0;padding:6px 10px;background:#040b16;color:var(--txt);border:1px solid var(--line);border-radius:9px;font:12px Consolas,monospace"><button class="btn ghost sm" id="testGuess" title="เดาจากไฟล์ build ของโปรเจกต์ (package.json, go.mod, Cargo.toml, *.csproj, pytest ...)">🔍 เดา</button><button class="btn ghost sm" id="testSave">บันทึก</button><button class="btn ghost sm" id="undoBtn" title="ย้อนการเขียนไฟล์ครั้งล่าสุด">↶ ย้อนการแก้ไขล่าสุด</button><label class="ap" title="หลังเขียนไฟล์ ให้ git commit เฉพาะไฟล์ที่แก้ (ถ้าอยู่บน main/master จะสร้าง branch ใหม่ก่อน)"><input type="checkbox" id="gitCommit">git commit อัตโนมัติ</label><span id="gitInfo" style="font-size:11px;color:var(--dim);white-space:nowrap"></span><button class="btn ghost sm" id="projBtn" title="hook, เว็บ, MCP, context">⚙ โปรเจกต์</button></div>
+<dialog id="projDlg">
+ <div class="lbl">ตั้งค่าโปรเจกต์และเครื่องมือ</div>
+ <div class="fld"><label>hook ก่อนเริ่มงาน (รันในโปรเจกต์จริง เช่น git pull)</label><input id="hBefore"></div>
+ <div class="fld"><label>hook หลังแก้ไฟล์ (รันในสำเนา ก่อนตรวจ เช่น black . หรือ npx prettier -w .)</label><input id="hPost"></div>
+ <div class="fld"><label>hook หลังเขียนไฟล์จริง (เช่น npm run build)</label><input id="hAfter"></div>
+ <div class="fld"><label><input type="checkbox" id="webOn" style="width:auto"> ให้ทีมใช้เว็บได้ (WEB ค้นหา, FETCH เปิดหน้าเว็บสาธารณะ)</label></div>
+ <div class="row2">
+  <div class="fld"><label>ตัวค้นเว็บ</label><select id="sProv"><option value="">ไม่ตั้ง (ใช้ FETCH อย่างเดียว)</option><option value="brave">Brave Search API</option><option value="searxng">SearXNG (ตั้งเอง)</option></select></div>
+  <div class="fld"><label>context ของ Ollama (โทเคน)</label><input id="numCtx" type="number" min="2048" step="1024"></div>
+ </div>
+ <div class="row2">
+  <div class="fld"><label>Brave API key</label><input id="sKey" type="password" autocomplete="off"></div>
+  <div class="fld"><label>URL ของ SearXNG</label><input id="sUrl" placeholder="http://localhost:8080"></div>
+ </div>
+ <div class="fld"><label>MCP servers (JSON) เช่น {"files": {"command": "npx", "args": ["-y", "@modelcontextprotocol/server-filesystem", "C:/proj"]}}</label><textarea id="mcpJson"></textarea></div>
+ <div id="projMsg" class="mono" style="min-height:18px;font-size:12px;margin:2px 0 12px;white-space:pre-wrap;word-break:break-word"></div>
+ <div style="display:flex;gap:8px;justify-content:flex-end;flex-wrap:wrap">
+  <button class="btn ghost sm" id="mcpTest">บันทึก + ทดสอบ MCP</button><button class="btn ghost sm" id="projClose">ปิด</button><button class="btn sm" id="projSave">บันทึก</button>
+ </div>
+</dialog>
 
 <main>
  <div class="col" id="team">
@@ -184,7 +210,8 @@ dialog::backdrop{background:rgba(2,6,14,.6)}
  </div>
  <div class="col" id="rooms"></div>
  <div class="col"><section class="card" id="logbox"><div class="lbl">บันทึกกิจกรรม</div><div id="log"></div>
-  <form><input id="task" placeholder="สั่งงาน เช่น แก้ cleaner.py ให้... หรือพิมพ์ /help" required>
+  <form><div id="attList"></div><input id="task" placeholder="สั่งงาน เช่น แก้ cleaner.py ให้... (วางรูปได้) หรือพิมพ์ /help" required>
+   <input type="file" id="files" multiple hidden><button type="button" class="btn ghost sm" id="attachBtn" title="แนบไฟล์หรือรูป (สูงสุด 8 ไฟล์ ไฟล์ละ 5 MB)">📎 แนบ</button>
    <select id="mode" title="โหมด" style="padding:9px 8px;border-radius:10px;border:1px solid var(--line);background:#040b16;color:var(--txt);font:12px 'Segoe UI'"><option value="edit">✏️ แก้โค้ด</option><option value="ask">💬 ถาม (อ่านอย่างเดียว)</option><option value="plan">🗺 วางแผนก่อน</option></select>
    <label class="ap"><input type="checkbox" id="appr">ยืนยันก่อนเขียนไฟล์</label>
    <button class="btn" id="go">RUN</button><button id="stop" type="button" disabled>หยุด</button></form>
@@ -412,7 +439,7 @@ $("updBtn").onclick=async()=>{
 };
 
 /* ---------- submit a job ---------- */
-const HELP=`<b>คำสั่ง</b><br>/ask คำถาม — ถามเกี่ยวกับโปรเจกต์ (อ่านอย่างเดียว)<br>/plan งาน — ให้อนุมัติแผนก่อนแก้ไฟล์<br>/edit งาน — แก้โค้ด (ค่าเริ่มต้น)<br>/test — รันคำสั่งทดสอบในโปรเจกต์จริง<br>/git — ดูสถานะ git<br>/undo — ย้อนการแก้ไขล่าสุด<br>/help — รายการนี้`;
+const HELP=`<b>คำสั่ง</b><br>/ask คำถาม — ถามเกี่ยวกับโปรเจกต์ (อ่านอย่างเดียว)<br>/plan งาน — ให้อนุมัติแผนก่อนแก้ไฟล์<br>/edit งาน — แก้โค้ด (ค่าเริ่มต้น)<br>/test — รันคำสั่งทดสอบในโปรเจกต์จริง<br>/git — ดูสถานะ git<br>/undo — ย้อนการแก้ไขล่าสุด<br>/help — รายการนี้<br><br><b>แนบไฟล์/รูป</b>: ปุ่ม 📎 หรือวางรูปในช่องพิมพ์ · <b>เว็บ/MCP/hook</b>: ปุ่ม ⚙ โปรเจกต์`;
 document.querySelector("form").onsubmit=async ev=>{
  ev.preventDefault();
  let task=$("task").value.trim(),mode=$("mode").value;
@@ -431,13 +458,13 @@ document.querySelector("form").onsubmit=async ev=>{
  $("seg").querySelectorAll("i").forEach(s=>s.classList.remove("f"));$("sys").textContent="RUNNING";
  t0=Date.now();clearInterval(timer);timer=setInterval(()=>$("el").textContent=Math.round((Date.now()-t0)/1000)+"s",500);
  try{
-  const r=await fetch("/",{method:"POST",body:JSON.stringify({task,mode,approve:$("appr").checked})});
+  const r=await fetch("/",{method:"POST",body:JSON.stringify({task,mode,approve:$("appr").checked,attachments:ATT})});
   await readStream(r,handle);
   if($("sys").textContent!="ERROR")$("sys").textContent="OPTIMAL";
  }catch(err){handle({error:err.message})}
  clearInterval(timer);stage(5);ROLES.forEach(r=>{S[r].on=false;$(r).classList.remove("on")});
  $("ag").textContent="0/"+ROLES.length;$("go").disabled=false;$("stop").disabled=true;
- loadHist();loadGit();
+ ATT=[];showAtt();loadHist();loadGit();
 };
 $("stop").onclick=()=>fetch("/stop",{method:"POST",body:"{}"});
 
@@ -493,6 +520,46 @@ $("testSave").onclick=async()=>{
  const r=await fetch("/settings",{method:"POST",body:JSON.stringify({test_cmd:$("testCmd").value})});
  $("testSave").textContent=r.ok?"บันทึกแล้ว ✔":"ผิดพลาด";setTimeout(()=>$("testSave").textContent="บันทึก",1200);
 };
+
+/* ---------- attachments ---------- */
+let ATT=[];
+function showAtt(){$("attList").innerHTML=ATT.map((a,i)=>`<span class="chip">${a.type.startsWith("image/")?"🖼":"📄"} ${esc(a.name)} <a title="เอาออก" onclick="ATT.splice(${i},1);showAtt()">✕</a></span>`).join("")}
+function addFile(f){
+ if(!f)return;
+ if(ATT.length>=8)return alert("แนบได้สูงสุด 8 ไฟล์");
+ if(f.size>5e6)return alert((f.name||"ไฟล์")+" ใหญ่เกิน 5 MB");
+ const r=new FileReader();
+ r.onload=()=>{ATT.push({name:f.name||"pasted.png",type:f.type||"text/plain",data:String(r.result).split(",")[1]||""});showAtt()};
+ r.readAsDataURL(f)}
+$("attachBtn").onclick=()=>$("files").click();
+$("files").onchange=()=>{[...$("files").files].forEach(addFile);$("files").value=""};
+$("task").addEventListener("paste",e=>{[...(e.clipboardData?.items||[])].filter(i=>i.kind==="file").forEach(i=>addFile(i.getAsFile()))});
+
+/* ---------- project settings: hooks, web, MCP, context ---------- */
+$("projBtn").onclick=()=>{
+ $("hBefore").value=CFG.hook_before||"";$("hPost").value=CFG.hook_post_edit||"";$("hAfter").value=CFG.hook_after_write||"";
+ $("webOn").checked=CFG.web!==false;$("sProv").value=CFG.search?.provider||"";$("sUrl").value=CFG.search?.url||"";$("sKey").value="";
+ $("sKey").placeholder=CFG.search?.has_key?"บันทึกไว้แล้ว (เว้นว่างเพื่อใช้ค่าเดิม)":"ถ้าใช้ Brave Search";
+ $("numCtx").value=CFG.num_ctx||16384;$("mcpJson").value=JSON.stringify(CFG.mcp||{},null,2);$("projMsg").textContent="";
+ $("projDlg").showModal()};
+async function saveProj(){
+ let mcp;try{mcp=JSON.parse($("mcpJson").value.trim()||"{}")}catch{throw new Error("MCP JSON ไม่ถูกต้อง")}
+ const r=await fetch("/settings",{method:"POST",body:JSON.stringify({hook_before:$("hBefore").value,hook_post_edit:$("hPost").value,
+  hook_after_write:$("hAfter").value,web:$("webOn").checked,num_ctx:+$("numCtx").value||16384,mcp,
+  search:{provider:$("sProv").value,url:$("sUrl").value,key:$("sKey").value}})});
+ const j=await r.json();if(j.error)throw new Error(j.error);
+ CFG=await fetch("/config").then(r=>r.json())}
+$("projSave").onclick=async()=>{try{await saveProj();$("projMsg").textContent="บันทึกแล้ว ✔";setTimeout(()=>$("projDlg").close(),600)}catch(e){$("projMsg").textContent="⚠ "+e.message}};
+$("mcpTest").onclick=async()=>{
+ try{await saveProj();$("projMsg").textContent="กำลังเปิด MCP servers…";
+  const j=await fetch("/mcp/test",{method:"POST",body:"{}"}).then(r=>r.json());
+  $("projMsg").textContent=Object.entries(j).map(([k,v])=>Array.isArray(v)?`✔ ${k}: ${v.length} เครื่องมือ (${v.slice(0,8).join(", ")})`:`⚠ ${k}: ${v}`).join("\n")||"ยังไม่ได้ตั้ง MCP server"}
+ catch(e){$("projMsg").textContent="⚠ "+e.message}};
+$("projClose").onclick=()=>$("projDlg").close();
+
+$("testGuess").onclick=async()=>{
+ const j=await fetch("/detect_test").then(r=>r.json()).catch(()=>({}));
+ if(j.cmd){$("testCmd").value=j.cmd;$("testSave").textContent="กดบันทึก"}else alert("เดาไม่ได้ ใส่คำสั่งทดสอบของโปรเจกต์เอง")};
 
 /* ---------- start ---------- */
 (async function init(){

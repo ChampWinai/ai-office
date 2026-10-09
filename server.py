@@ -1,10 +1,11 @@
 """AI Office: departments (plan -> build -> review) over Ollama, read/write files in a user-chosen workspace.
 Run: python server.py (web) or python office_app.py (desktop window)"""
-import difflib, hashlib, json, os, re, shutil, subprocess, sys, tempfile, threading, time, urllib.error, urllib.parse, urllib.request
+import base64, difflib, hashlib, json, os, re, shutil, subprocess, sys, tempfile, threading, time, urllib.error, urllib.parse, urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import edits as E
+import extras as X
 
 VERSION = os.environ.get("AIOFFICE_VERSION", "1.0.3")
 REPO = "ChampWinai/ai-office"
@@ -80,7 +81,12 @@ def config():
     keys = ("th", "room", "color", "hair", "phase", "model", "hard_model")
     return {"version": VERSION, "roles": {r: {k: c.get(k) for k in keys} for r, c in ROLES.items()},
             "models": ollama_tags() or [], "provider": public_provider(), "test_cmd": proj().get("test_cmd", ""),
-            "git_commit": bool(proj().get("git_commit")), "num_ctx": int(CFG.get("num_ctx", 16384))}
+            "git_commit": bool(proj().get("git_commit")), "num_ctx": int(CFG.get("num_ctx", 16384)),
+            "hook_before": proj().get("hook_before", ""), "hook_post_edit": proj().get("hook_post_edit", ""),
+            "hook_after_write": proj().get("hook_after_write", ""), "web": CFG.get("web", True),
+            "search": {"provider": (CFG.get("search") or {}).get("provider", ""), "url": (CFG.get("search") or {}).get("url", ""),
+                       "has_key": bool((CFG.get("search") or {}).get("key"))},
+            "mcp": CFG.get("mcp") or {}}
 
 
 # ---------- AI provider: local Ollama, or an API (Anthropic-compatible / OpenAI-compatible) ----------
@@ -326,13 +332,43 @@ def install_update(emit):
 
 # ---------- project settings, memory, rules ----------
 
-TOOLS_HELP = """
-# TOOLS - look at the project before deciding. One tool per line, nothing else on that line:
-SEARCH: <regex or words>            -> matching lines as path:line: text (max 40)
+WORKSPACE_TOOLS = """SEARCH: <regex or words>            -> matching lines as path:line: text (max 40)
 READ: <path>   or   READ: <path>:<start>-<end>   -> file content (max 400 lines per call)
-LIST: <folder>                      -> entries of a folder ("." for the project root)
-After tool lines, stop: the results arrive in the next message. Never guess the content of a file you have not read.
-"""
+LIST: <folder>                      -> entries of a folder ("." for the project root)"""
+WEB_TOOLS = """WEB: <search words>                -> web search results (title, url, snippet)
+FETCH: <https url>                  -> a public web page as text (docs, issues, changelogs)"""
+VISION_HINTS = ("vl", "llava", "vision", "gemma3", "minicpm", "moondream", "pixtral")
+
+
+def tools_help(servers):
+    """Tool list for agents allowed to look around: workspace tools, web tools, and the configured MCP tools."""
+    parts = ["\n# TOOLS - look before deciding. One tool per line, nothing else on that line. After tool lines, stop: "
+             "the results arrive in the next message. Never guess the content of a file or page you have not read."]
+    if WS:
+        parts.append(WORKSPACE_TOOLS)
+    if CFG.get("web", True):
+        parts.append(WEB_TOOLS)
+    if servers:
+        parts.append(X.mcp_help(servers))
+    return "\n".join(p for p in parts if p) + "\n"
+
+
+def to_provider(messages, kind):
+    """Messages may carry images ([{"mime", "data"(base64)}]); each provider wants them in its own shape."""
+    out = []
+    for m in messages:
+        imgs = m.get("images") or []
+        if not imgs:
+            out.append({"role": m["role"], "content": m["content"]})
+        elif kind == "ollama":
+            out.append({"role": m["role"], "content": m["content"], "images": [i["data"] for i in imgs]})
+        elif kind == "anthropic":
+            out.append({"role": m["role"], "content": [{"type": "image", "source": {"type": "base64", "media_type": i["mime"], "data": i["data"]}}
+                                                       for i in imgs] + [{"type": "text", "text": m["content"]}]})
+        else:
+            out.append({"role": m["role"], "content": [{"type": "text", "text": m["content"]}]
+                        + [{"type": "image_url", "image_url": {"url": f"data:{i['mime']};base64,{i['data']}"}} for i in imgs]})
+    return out
 RULE_FILES = ("AGENTS.md", "CLAUDE.md", "AIOFFICE.md")
 
 
@@ -364,7 +400,8 @@ def memory_text():
     if not h:
         return ""
     lines = [f"- {j['ts']} [{'ผ่าน' if j['ok'] else 'ไม่ผ่าน'}] {j['task']} | files: {', '.join(j['files']) or '-'} | {j['summary'][:300]}" for j in h]
-    return "\n\n# PREVIOUS JOBS IN THIS PROJECT (oldest first)\n" + "\n".join(lines) + "\n"
+    return ("\n\n# PREVIOUS JOBS IN THIS PROJECT (oldest first) - background only: do not redo them unless the request asks\n"
+            + "\n".join(lines) + "\n")
 
 
 def passed(fb):  # last "VERDICT: X" anywhere wins; unparseable => FAIL
@@ -381,18 +418,18 @@ def runnable(text):
 
 # ---------- the office ----------
 
-def ask(role, messages, hard=False, usage=None, with_tools=False):
+def ask(role, messages, hard=False, usage=None, help_text=""):
     """Yield text chunks from the active provider; fills usage with token counts when the provider reports them."""
     cfg = ROLES[role]
     system = ((HERE / "rules.md").read_text(encoding="utf-8") + project_rules() + "\n" + cfg["prompt"]
-              + (TOOLS_HELP if with_tools else ""))
+              + help_text)
     p = provider()
     if p["type"] != "ollama":
-        yield from ask_api(p, system, messages, usage)
+        yield from ask_api(p, system, to_provider(messages, p["type"]), usage)
         return
     body = {"model": cfg.get("hard_model", cfg["model"]) if hard else cfg["model"], "stream": True,
             "options": {"num_ctx": int(CFG.get("num_ctx", 16384))},  # Ollama's default window (2-4k) silently cuts long prompts
-            "messages": [{"role": "system", "content": system}] + messages}
+            "messages": [{"role": "system", "content": system}] + to_provider(messages, "ollama")}
     req = urllib.request.Request(OLLAMA + "/api/chat", json.dumps(body).encode(), {"Content-Type": "application/json"})
     with urllib.request.urlopen(req, timeout=900) as r:
         for line in r:
@@ -432,37 +469,75 @@ def wait_decision(timeout=300):
     return False
 
 
-def orchestrate(task, emit, approve=False, mode="edit"):
-    """mode: "edit" (change files), "ask" (read-only answer), "plan" (the user approves the plan before any edit)."""
+def orchestrate(task, emit, approve=False, mode="edit", attachments=None):
+    """mode: "edit" (change files), "ask" (read-only answer), "plan" (the user approves the plan before any edit).
+    attachments: [{"name", "type", "data"(base64)}] - text files go into the prompts, images to the models that see."""
     hard = False
     CANCEL.clear()
     DECIDED.clear()
     t0 = time.time()
     files = E.project_files(WS) if WS else []
     read_paths, tokens = set(), {"n": 0}
+    servers = X.mcp_servers(CFG.get("mcp")) if CFG.get("mcp") else {}
+    for name, s in servers.items():
+        if isinstance(s, str):
+            emit(note=f"MCP {name}: {s}")
+    att_text, images = "", []
+    for a in (attachments or [])[:8]:
+        raw = base64.b64decode(a.get("data") or "")[:5_000_000]
+        if (a.get("type") or "").startswith("image/"):
+            images.append({"mime": a["type"], "data": base64.b64encode(raw).decode()})
+        else:
+            att_text += f"\n--- {a.get('name', 'file')} ---\n{raw.decode('utf-8', 'replace')[:20000]}\n"
+    if CFG.get("web", True):  # links the user wrote are read for the team up front (small models rarely FETCH on their own)
+        for url in list(dict.fromkeys(re.findall(r"https?://[^\s<>\"')]+", task)))[:2]:
+            try:
+                att_text += f"\n--- เนื้อหาจาก {url} ---\n{X.fetch(url, 20000)}\n"
+                emit(note="อ่านลิงก์: " + url)
+            except Exception as e:
+                emit(note=f"อ่านลิงก์ไม่ได้: {url} ({e})")
+    if att_text:
+        att_text = "\n\n# ATTACHMENTS FROM THE USER" + att_text
+    if images:
+        emit(note=f"แนบรูป {len(images)} รูป")
+        seeing = ("PLAN",) if mode == "ask" else ("BOSS", "DEV")  # the roles that receive the pictures
+        if provider()["type"] == "ollama" and not any(h in ROLES[r]["model"].lower() for r in seeing for h in VISION_HINTS):
+            emit(note="โมเดลที่ตั้งไว้อาจมองรูปไม่เห็น: เลือกโมเดลที่รองรับรูป (เช่น qwen2.5vl, llava) หรือใช้ API เช่น Gemini")
 
-    def say(role, prompt, phase=None, tools=0):
-        """One agent turn; with tools>0 it may SEARCH/READ/LIST the project up to that many times first."""
+    def say(role, prompt, phase=None, tools=0, pics=None):
+        """One agent turn; with tools>0 it may use SEARCH/READ/LIST/WEB/FETCH/MCP up to that many times first."""
         emit(role=role, status="working", phase=phase or ROLES[role].get("phase"))
-        messages, out = [{"role": "user", "content": prompt}], ""
+        messages, out = [{"role": "user", "content": prompt, "images": pics or []}], ""
+        help_text = tools_help(servers) if tools else ""
         for turn in range(tools + 1):
             usage, part = {"in": 0, "out": 0}, ""
-            for tok in ask(role, messages, hard, usage, with_tools=tools > 0 and WS is not None):
+            for tok in ask(role, messages, hard, usage, help_text):
                 if CANCEL.is_set():
                     raise Cancelled()
                 part += tok
                 emit(role=role, token=tok)
-            tokens["n"] += (usage["in"] or len(json.dumps(messages, ensure_ascii=False)) // 3) + (usage["out"] or len(part) // 3)
+            tokens["n"] += (usage["in"] or sum(len(m["content"]) for m in messages) // 3) + (usage["out"] or len(part) // 3)
             out += part
-            calls = E.tool_calls(part)[:6] if WS and turn < tools else []
+            calls = E.tool_calls(part)[:6] if turn < tools else []
             if not calls:
                 break
             results = []
             for kind, arg in calls:
                 try:
-                    res = E.run_tool(WS, files, kind, arg)
-                except (E.EditError, OSError) as e:
-                    res = f"(ผิดพลาด: {e})"
+                    if kind == "READ" and arg.strip().startswith(("http://", "https://")):
+                        kind = "FETCH"  # models sometimes READ a link
+                    if kind in ("SEARCH", "READ", "LIST"):
+                        res = E.run_tool(WS, files, kind, arg) if WS else "(ยังไม่ได้เลือกโฟลเดอร์งาน)"
+                    elif kind in ("WEB", "FETCH") and not CFG.get("web", True):
+                        res = "(ผู้ใช้ปิดการใช้เว็บไว้)"
+                    elif kind == "WEB":
+                        res = X.web_search(arg, CFG.get("search"))
+                    elif kind == "FETCH":
+                        res = X.fetch(arg.strip("<> `"))
+                    else:
+                        res = X.mcp_call(servers, arg)
+                except Exception as e:  # a tool failing (network, bad path, MCP error) is information, not a crash
+                    res = f"(ผิดพลาด: {type(e).__name__}: {e})"
                 if kind == "READ":
                     read_paths.add(re.sub(r":\d+(-\d+)?$", "", arg.strip().strip("`")))
                 results.append(f"[{kind}: {arg}]\n{res}")
@@ -478,21 +553,24 @@ def orchestrate(task, emit, approve=False, mode="edit"):
 
     if mode == "ask":  # read-only: the analyst looks around and answers
         bundle = E.file_bundle(WS, E.pick_files(task, "", files)) if WS else ""
-        answer = say("PLAN", f"QUESTION from the user about this project. First use the TOOLS to find and READ the code that answers it, "
+        answer = say("PLAN", f"QUESTION from the user. Use the TOOLS that fit before answering: project files (SEARCH/READ/LIST) for questions "
+                             f"about this code, WEB/FETCH for outside facts, and MCP tools when the user names one; "
                              f"then answer clearly in Thai, citing file paths and function names. Do NOT propose edits and do not end with a FILES line.\n"
-                             f"{task}{memory}{wsctx}" + (f"\n\nFILES THAT MAY BE RELEVANT:{bundle}" if bundle else ""),
-                     phase="plan", tools=6)
+                             f"{task}{att_text}{memory}{wsctx}" + (f"\n\nFILES THAT MAY BE RELEVANT:{bundle}" if bundle else ""),
+                     phase="plan", tools=6, pics=images)
         record(task, True, [], answer, round(time.time() - t0))
         emit(done=True, tokens=tokens["n"])
         return
 
-    spec = say("BOSS", f"คำสั่งจากลูกค้า: {task}{memory}{wsctx}\nเขียนสเปกงาน")
+    if WS and proj().get("hook_before") and mode != "ask":
+        emit(note="hook ก่อนเริ่มงาน: " + E.run_cmds(WS, [proj()["hook_before"]], timeout=300).replace("\n", " ")[:400])
+    spec = say("BOSS", f"คำสั่งจากลูกค้า: {task}{att_text}{memory}{wsctx}\nเขียนสเปกงาน", pics=images)
     hard = bool(re.search(r"LEVEL:\s*HARD", spec, re.I))
     emit(note="ระดับงาน: " + ("HARD → ใช้โมเดลใหญ่" if hard else "EASY"))
     notes = ""  # plan-phase departments look at the project and think before anyone edits
     for name, cfg in ROLES.items():
         if cfg.get("phase") == "plan":
-            out = say(name, f"Original request (authoritative):\n{task}\n\nSpec:\n{spec}{memory}{wsctx}"
+            out = say(name, f"Original request (authoritative):\n{task}{att_text}\n\nSpec:\n{spec}{memory}{wsctx}"
                             + (f"\n\nEarlier departments said:\n{notes}" if notes else "")
                             + ("\n\nUse the tools to find the relevant code, then end your answer with one line: FILES: path1, path2" if WS else ""),
                       tools=4)
@@ -522,14 +600,18 @@ def orchestrate(task, emit, approve=False, mode="edit"):
             for rnd in range(MAX_ROUNDS):
                 emit(round=rnd + 1)
                 redo = f"\n\nYour previous answer:\n{last}\n\nQA FEEDBACK:\n{feedback}\n\nCHECK RESULT:\n{result}" if feedback else ""
-                last = say("DEV", f"Original request (authoritative, follow it exactly):\n{task}\n\nSpec:\n{spec}"
+                last = say("DEV", f"Original request (authoritative, follow it exactly):\n{task}{att_text}\n\nSpec:\n{spec}"
                                   f"\n\nDepartment notes (follow the change plan and security rules):{notes}{memory}"
-                                  f"{wsctx}\n\nCURRENT FILES:{bundle}{redo}", tools=2)
+                                  f"{wsctx}\n\nCURRENT FILES:{bundle}{redo}", tools=2, pics=images)
                 ops = E.parse_ops(last)
-                hit = re.search(r"[\w\-./]+\.\w+", task)
-                loose = [f for f in E.fences(last) if not f["path"] and f["lang"] in ("", "python", "py")]
-                if not ops and hit and loose:  # a bare code block: it belongs to the file the request names
-                    ops = [{"kind": "write", "path": hit.group(0), "body": loose[0]["body"]}]
+                m = re.search(r"[\w\-./]+\.\w+", task)
+                hit = next((f for f in files if f in task or Path(f).name in task), None) or (m.group(0) if m else None)
+                loose = sorted((f for f in E.fences(last) if not f["path"] and f["body"].strip()), key=lambda f: len(f["body"]), reverse=True)
+                if not ops and hit and loose:  # a bare code block (any language) for the file the request names...
+                    old = WS / hit
+                    old_lines = len(E.read_text(old)[0].splitlines()) if old.is_file() else 0
+                    if len(loose[0]["body"].splitlines()) >= 0.6 * old_lines:  # ...but only if it is the whole file, not a fragment
+                        ops = [{"kind": "write", "path": hit, "body": loose[0]["body"]}]
                 cmds = [o["cmd"] for o in ops if o["kind"] == "run"]
                 new_cmds = [c for c in cmds if c not in allowed_cmds and c not in denied_cmds]
                 if new_cmds:  # every shell command is the user's call, even outside approve mode
@@ -543,6 +625,8 @@ def orchestrate(task, emit, approve=False, mode="edit"):
                 denied = [c for c in cmds if c in denied_cmds]
                 if denied:  # the user's choice, not a defect: the rest of the change is still judged on its own
                     run_out = (run_out + "\n" if run_out else "") + "ผู้ใช้ไม่อนุญาตให้รันคำสั่ง (ข้ามไป ไม่ต้องรันอีก): " + ", ".join(denied)
+                if proj().get("hook_post_edit") and ops:  # e.g. a formatter; runs on the copy, its changes are reviewed too
+                    run_out = (run_out + "\n" if run_out else "") + "[hook หลังแก้]\n" + E.run_cmds(root, [proj()["hook_post_edit"]], timeout=300)
                 changed, deleted = E.changes(WS, root, copied)
                 missing = [f for f in named if f not in changed and f not in deleted]
                 if missing:
@@ -577,6 +661,8 @@ def orchestrate(task, emit, approve=False, mode="edit"):
                     run = E.commit(WS, root, changed, deleted)
                     emit(note=f"เขียน {len(changed)} ไฟล์, ลบ {len(deleted)} ไฟล์ (สำรองของเดิมไว้ที่ .office_bak/{run})",
                          files=changed + deleted, applied=run)
+                    if proj().get("hook_after_write"):
+                        emit(note="hook หลังเขียนไฟล์: " + E.run_cmds(WS, [proj()["hook_after_write"]], timeout=300).replace("\n", " ")[:600])
                     if proj().get("git_commit") and E.is_git(WS):
                         emit(note="git: " + E.git_commit(WS, changed + deleted, "AI Office: " + task[:72]))
                 else:
@@ -653,6 +739,8 @@ class H(BaseHTTPRequestHandler):
             return self.reply(200, config())
         if self.path == "/history":
             return self.reply(200, proj().get("history", [])[::-1])
+        if self.path == "/detect_test":
+            return self.reply(200, {"cmd": E.detect_test_cmd(WS) if WS else ""})
         if self.path == "/git":
             return self.reply(200, E.git_status(WS) if WS else {"git": False})
         if self.path == "/setup/status":
@@ -690,6 +778,21 @@ class H(BaseHTTPRequestHandler):
                     proj()["git_commit"] = bool(body["git_commit"])
                 if "num_ctx" in body:
                     CFG["num_ctx"] = max(2048, int(body["num_ctx"]))
+                for k in ("hook_before", "hook_post_edit", "hook_after_write"):
+                    if k in body:
+                        proj()[k] = (body[k] or "").strip()
+                if "web" in body:
+                    CFG["web"] = bool(body["web"])
+                if "search" in body:
+                    sv = body["search"] or {}
+                    old_key = (CFG.get("search") or {}).get("key", "")
+                    CFG["search"] = {"provider": sv.get("provider", ""), "url": (sv.get("url") or "").strip(),
+                                     "key": (sv.get("key") or "").strip() or old_key}  # empty field keeps the saved key
+                if "mcp" in body:
+                    mcp = json.loads(body["mcp"]) if isinstance(body["mcp"], str) else body["mcp"]
+                    if not isinstance(mcp, dict) or any(not isinstance(v, dict) or "command" not in v for v in mcp.values()):
+                        raise ValueError('MCP ต้องเป็น JSON แบบ {"ชื่อ": {"command": "...", "args": [...]}}')
+                    CFG["mcp"] = mcp
                 save_settings()
                 return self.reply(200, {"ok": True})
             if self.path == "/run_test":
@@ -697,6 +800,9 @@ class H(BaseHTTPRequestHandler):
                 if not (WS and cmd):
                     raise ValueError("ยังไม่ได้ตั้งคำสั่งทดสอบหรือโฟลเดอร์งาน")
                 return self.reply(200, {"output": E.run_cmds(WS, [cmd], timeout=300)})
+            if self.path == "/mcp/test":
+                st = X.mcp_servers(CFG.get("mcp"))
+                return self.reply(200, {k: (v if isinstance(v, str) else [t["name"] for t in v.tools]) for k, v in st.items()})
             if self.path == "/stop":
                 CANCEL.set()
                 return self.reply(200, {"ok": True})
@@ -710,7 +816,7 @@ class H(BaseHTTPRequestHandler):
             if not JOB.acquire(blocking=False):
                 return self.reply(409, {"error": "มีงานกำลังรันอยู่ รอให้เสร็จหรือกดหยุดก่อน"})
             try:
-                return self.stream(lambda emit: orchestrate(body["task"], emit, bool(body.get("approve")), body.get("mode", "edit")))
+                return self.stream(lambda emit: orchestrate(body["task"], emit, bool(body.get("approve")), body.get("mode", "edit"), body.get("attachments")))
             finally:
                 JOB.release()
         if self.path == "/setup":

@@ -29,6 +29,14 @@ def test_parse_all_op_kinds():
     assert ops[1]["pairs"] == [("x = 1", "x = 2"), ("y = 1", "y = 3")] and ops[3]["to"] == "b.txt"
 
 
+def test_empty_path_block_joins_next_block_and_blank_write_is_refused():
+    ops = edits.parse_ops("```csharp\npath=A.cs\n```\n\n```csharp\nclass A {}\n```")
+    assert ops == [{"kind": "write", "path": "A.cs", "body": "class A {}\n"}], ops
+    root = _ws({"A.cs": b"class A { int x; }\n"})
+    errs = edits.apply_ops(root, [{"kind": "write", "path": "A.cs", "body": "  \n"}])
+    assert errs and "เนื้อหาว่าง" in errs[0] and (root / "A.cs").read_bytes() == b"class A { int x; }\n"
+
+
 def test_ambiguous_search_is_refused():
     root = _ws({"a.py": b"x = 1\nx = 1\n"})
     errs = edits.apply_ops(root, [{"kind": "edit", "path": "a.py", "pairs": [("x = 1\n", "x = 9\n")]}])
@@ -76,6 +84,27 @@ def test_checks_catch_syntax_errors():
     root = _ws({"bad.py": b"def f(:\n", "bad.json": b"{oops"})
     report, ok = edits.run_checks(root, ["bad.py", "bad.json"], "", sys.executable)
     assert not ok and "syntax bad.py" in report and "syntax bad.json" in report
+
+
+def test_checks_for_other_languages():
+    root = _ws({"a.toml": b"x = [1,\n", "b.xml": b"<a><b></a>", "ok.toml": b"x = 1\n",
+                "c.js": b"function f( {\n", "d.js": b"const x = 1;\n", "e.unknown": b"whatever"})
+    report, ok = edits.run_checks(root, ["a.toml", "b.xml", "ok.toml", "e.unknown"], "", sys.executable)
+    assert not ok and "syntax a.toml" in report and "syntax b.xml" in report and "ok.toml" not in report
+    if edits.program("node"):
+        report, ok = edits.run_checks(root, ["c.js"], "", sys.executable)
+        assert not ok and "syntax c.js" in report
+        assert edits.run_checks(root, ["d.js"], "", sys.executable)[1]
+
+
+def test_detect_test_command():
+    assert edits.detect_test_cmd(_ws({"package.json": b'{"scripts": {"test": "jest"}}'})) == "npm test --silent"
+    assert edits.detect_test_cmd(_ws({"package.json": b'{"scripts": {"test": "echo \\"Error: no test specified\\""}}'})) == ""
+    assert edits.detect_test_cmd(_ws({"go.mod": b"module x\n"})) == "go test ./..."
+    assert edits.detect_test_cmd(_ws({"App.csproj": b"<Project/>"})) == "dotnet test --nologo"
+    assert edits.detect_test_cmd(_ws({"Cargo.toml": b"[package]\n"})) == "cargo test -q"
+    py = edits.detect_test_cmd(_ws({"tests/test_a.py": b"", "app.py": b""}))
+    assert py in ("python -m pytest -q", "python -m unittest discover -q -s tests -t ."), py
 
 
 def test_tools_search_read_list():

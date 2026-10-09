@@ -4,6 +4,8 @@ import difflib, hashlib, json, os, re, shutil, subprocess, sys, tempfile, thread
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+from edits import apply_ops, commit, diff_for, fences, file_bundle, parse_ops, pick_files, run_checks, stage, undo_last
+
 VERSION = os.environ.get("AIOFFICE_VERSION", "1.0.3")
 REPO = "ChampWinai/ai-office"
 FROZEN = getattr(sys, "frozen", False)
@@ -79,7 +81,7 @@ def ollama_tags():
 def config():
     keys = ("th", "room", "color", "hair", "phase", "model", "hard_model")
     return {"version": VERSION, "roles": {r: {k: c.get(k) for k in keys} for r, c in ROLES.items()},
-            "models": ollama_tags() or [], "provider": public_provider()}
+            "models": ollama_tags() or [], "provider": public_provider(), "test_cmd": CFG.get("test_cmd", "")}
 
 
 # ---------- AI provider: local Ollama, or an API (Anthropic-compatible / OpenAI-compatible) ----------
@@ -324,18 +326,6 @@ def passed(fb):  # last "VERDICT: X" anywhere wins; unparseable => FAIL
     return bool(v) and v[-1].upper() == "PASS"
 
 
-def fences(text):
-    """Code fences as dicts: lang, path (from 'path=...' on the fence line, or None), body."""
-    out = []
-    for info, body in re.findall(r"```([^\n`]*)\n(.*?)```", text, re.S):
-        m = re.search(r"path=(\S+)", info)
-        if not m:  # small models sometimes put it as the first line of the body instead
-            m = re.match(r"\s*(?:#\s*)?path=(\S+)[^\n]*\n", body)
-            body = body[m.end():] if m else body
-        out.append({"lang": (info.split() or [""])[0].lower(), "path": m.group(1).strip("\"'") if m else None, "body": body})
-    return out
-
-
 def runnable(text):
     """First python fence = the code we execute for QA."""
     for f in fences(text):
@@ -364,44 +354,6 @@ def workspace_context(task, with_contents):
             if Path(f).name.lower() in task.lower():
                 txt += f"\n--- {f} ---\n{(WS / f).read_text(encoding='utf-8', errors='replace')[:8000]}\n--- end {f} ---\n"
     return txt
-
-
-def plan_writes(reply, task):
-    """Files the reply wants to write (path=...). Refuses paths outside the workspace."""
-    fs = fences(reply)
-    named = re.search(r"[\w\-./]+\.(?:%s)\b" % "|".join(e[1:] for e in TEXT), task)  # filename mentioned in the request
-    if named and fs and not any(f["path"] for f in fs):  # DEV forgot path=: use the first code block for that name
-        fs[0]["path"] = named.group(0)
-    plan = []
-    for f in fs:
-        if not f["path"]:
-            continue
-        target = (WS / f["path"]).resolve()
-        if not target.is_relative_to(WS.resolve()):
-            raise ValueError("path อยู่นอกโฟลเดอร์งาน: " + f["path"])
-        old = target.read_text(encoding="utf-8", errors="replace") if target.exists() else ""
-        plan.append({"path": f["path"], "target": target, "body": f["body"], "old": old})
-    return plan
-
-
-def diff_text(plan):
-    out = ""
-    for p in plan:
-        out += "".join(difflib.unified_diff(p["old"].splitlines(True), p["body"].splitlines(True),
-                                            f"a/{p['path']}" if p["old"] else "/dev/null", f"b/{p['path']}"))
-    return out[:4000]
-
-
-def apply_writes(plan):
-    """Write the planned files; the old version of each goes to .office_bak first."""
-    for p in plan:
-        t = p["target"]
-        if t.exists():
-            (WS / ".office_bak").mkdir(exist_ok=True)
-            shutil.copy2(t, WS / ".office_bak" / f"{time.strftime('%H%M%S')}_{t.name}")
-        t.parent.mkdir(parents=True, exist_ok=True)
-        t.write_text(p["body"], encoding="utf-8")
-    return [p["path"] for p in plan]
 
 
 # ---------- the office ----------
@@ -470,56 +422,108 @@ def orchestrate(task, emit, approve=False):
     spec = say("BOSS", f"คำสั่งจากลูกค้า: {task}{workspace_context(task, False)}\nเขียนสเปกงาน")
     hard = bool(re.search(r"LEVEL:\s*HARD", spec, re.I))
     emit(note="ระดับงาน: " + ("HARD → ใช้โมเดลใหญ่" if hard else "EASY"))
-    wsctx = workspace_context(task, True)
+    wsctx = workspace_context(task, False)
     notes = ""  # plan-phase departments think before anyone edits; their notes go to DEV
     for name, cfg in ROLES.items():
         if cfg.get("phase") == "plan":
             out = say(name, f"Original request (authoritative):\n{task}\n\nSpec:\n{spec}{wsctx}"
-                            + (f"\n\nEarlier departments said:\n{notes}" if notes else ""))
+                            + (f"\n\nEarlier departments said:\n{notes}" if notes else "")
+                            + ("\n\nEnd your answer with one line: FILES: path1, path2 (files to read or change, exact relative paths)" if WS else ""))
             notes += f"\n\n[{cfg['th']}]\n{out}"
-    code, feedback, result, seen, ok = "", "", "", set(), False
-    for rnd in range(MAX_ROUNDS):
-        emit(round=rnd + 1)
-        redo = f"\n\nPrevious code:\n{code}\n\nQA feedback:\n{feedback}\n\nRUN RESULT of previous code:\n{result}" if feedback else ""
-        code = say("DEV", f"Original request (authoritative, follow it exactly):\n{task}\n\nSpec:\n{spec}"
-                          f"\n\nDepartment notes (follow the change plan and security rules):{notes}{wsctx}{redo}")
-        cur = runnable(code)
-        if cur and cur in seen:  # DEV resent identical code: escalate once, then give up
-            if hard:
-                emit(note="DEV ส่งโค้ดเดิมซ้ำ หยุดวนรอบ")
-                break
-            hard = True
-            emit(note="DEV ส่งโค้ดเดิมซ้ำ → เปลี่ยนเป็นโมเดลใหญ่")
-        seen.add(cur)
-        result, run_ok = run_code(cur)
-        if result:
-            emit(note="ผลรันโค้ด: " + result.replace("\n", " ")[:160])
-        feedback = say("QA", f"Original request (authoritative):\n{task}\n\nSpec:\n{spec}\n\nCode:\n{code}"
-                       + (f"\n\nACTUAL RUN RESULT (trust this over guessing):\n{result}" if result else ""))
-        ok = passed(feedback) and run_ok  # a failing run overrides QA's PASS
-        if passed(feedback) and not run_ok:
-            emit(note="QA ให้ PASS แต่รันไม่ผ่าน → ตีกลับอัตโนมัติ")
-            feedback += "\nSYSTEM: tests failed, verdict overridden to FAIL."
-        if ok:
-            break
+
+    def edit_loop():
+        """Workspace mode: DEV proposes edits -> applied to a COPY -> checks -> QA reads the diff -> approve -> commit."""
+        nonlocal hard
+        picked = pick_files(task, notes, workspace_files())
+        if picked:
+            emit(note="อ่านไฟล์: " + ", ".join(picked))
+        bundle = file_bundle(WS, picked) if picked else ""
+        test_cmd = CFG.get("test_cmd", "")
+        pyexe = (shutil.which("python") or shutil.which("py")) if FROZEN else sys.executable
+        feedback, result, last, ok, changed, root, rnd, diff = "", "", "", False, [], None, 0, ""
+        files = workspace_files()
+        try:
+            for rnd in range(MAX_ROUNDS):
+                emit(round=rnd + 1)
+                redo = f"\n\nYour previous answer:\n{last}\n\nQA FEEDBACK:\n{feedback}\n\nCHECK RESULT:\n{result}" if feedback else ""
+                last = say("DEV", f"Original request (authoritative, follow it exactly):\n{task}\n\nSpec:\n{spec}"
+                                  f"\n\nDepartment notes (follow the change plan and security rules):{notes}"
+                                  f"{wsctx}\n\nCURRENT FILES:{bundle}{redo}")
+                ops = parse_ops(last)
+                named = re.search(r"[\w\-./]+\.\w+", task)
+                loose = [f for f in fences(last) if not f["path"] and f["lang"] in ("", "python", "py")]
+                if not ops and named and loose:  # a bare code block: it belongs to the file the request names
+                    ops = [{"kind": "write", "path": named.group(0), "body": loose[0]["body"]}]
+                if root:
+                    shutil.rmtree(root, ignore_errors=True)
+                root = stage(WS, SKIP)
+                changed, errs = apply_ops(root, ops)
+                if not ops:
+                    errs = ["ไม่พบการแก้ไข: ตอบด้วย block เต็มไฟล์ (path=...) หรือ SEARCH/REPLACE"]
+                named_files = [f for f in files if f in task or Path(f).name in task]  # the request names them: they must change
+                missing = [f for f in named_files if f not in changed]
+                if missing:
+                    errs.append("คำสั่งระบุให้แก้ไฟล์เหล่านี้ แต่ยังไม่มีการแก้: " + ", ".join(missing))
+                report, checks_ok = run_checks(root, changed, test_cmd, pyexe)
+                result = ("\n".join(errs) + "\n" if errs else "") + report
+                emit(note="ตรวจในสำเนา: " + (", ".join(changed) or "ไม่มีไฟล์เปลี่ยน") + (f" · ข้อผิดพลาด {len(errs)}" if errs else ""))
+                if errs:
+                    emit(note="แก้ไม่สำเร็จ: " + " | ".join(errs)[:400])
+                diff = diff_for(WS, root, changed) if changed else ""
+                feedback = say("QA", f"Original request (authoritative):\n{task}\n\nSpec:\n{spec}\n\nDIFF:\n{diff}\n\nCHECK RESULT:\n{result}")
+                ok = passed(feedback) and checks_ok and not errs and bool(changed)
+                if passed(feedback) and not ok:
+                    emit(note="QA ให้ PASS แต่การตรวจไม่ผ่าน → ตีกลับอัตโนมัติ")
+                    feedback += "\nSYSTEM: checks failed, verdict overridden to FAIL."
+                if ok:
+                    break
+            if ok:
+                emit(note="แก้ไขไฟล์: " + ", ".join(changed), diff=diff)
+                declined = False
+                if approve:
+                    emit(approve=True, files=changed)
+                    declined = not wait_decision()
+                    if declined:
+                        emit(note="ไม่เขียนไฟล์ (ไม่อนุมัติหรือหมดเวลา)")
+                if not declined:
+                    run = commit(WS, root, changed)
+                    emit(note=f"เขียนไฟล์ {len(changed)} ไฟล์ (สำรองของเดิมไว้ที่ .office_bak/{run})", files=changed, applied=run)
+            else:
+                emit(note="ไม่ผ่านการตรวจ จึงไม่เขียนไฟล์")
+        finally:
+            if root:
+                shutil.rmtree(root, ignore_errors=True)
+        return ok, rnd, feedback, last
+
     if WS:
-        plan = plan_writes(code, task) if ok else []
-        declined = False
-        if plan:
-            emit(note="แก้ไขไฟล์: " + ", ".join(p["path"] for p in plan), diff=diff_text(plan))
-        if plan and approve:
-            emit(approve=True, files=[p["path"] for p in plan])
-            declined = not wait_decision()
-            if declined:
-                emit(note="ไม่เขียนไฟล์ (ไม่อนุมัติหรือหมดเวลา)")
-        if plan and not declined:
-            written = apply_writes(plan)
-            backed = " (สำรองของเดิมไว้ใน .office_bak)" if any(p["old"] for p in plan) else ""
-            emit(note="เขียนไฟล์ลงโฟลเดอร์งาน: " + ", ".join(written) + backed, files=written)
-        elif not ok:
-            emit(note="ไม่ผ่านการตรวจ จึงไม่เขียนไฟล์")
-        elif not plan:
-            emit(note="ผ่านแล้ว แต่ไม่ได้เขียนไฟล์: ไม่ทราบชื่อไฟล์ (ระบุชื่อไฟล์ในคำสั่ง เช่น hello.py)")
+        ok, rnd, feedback, code = edit_loop()
+    else:
+        code, feedback, result, seen, ok, rnd = "", "", "", set(), False, 0
+        for rnd in range(MAX_ROUNDS):
+            emit(round=rnd + 1)
+            redo = f"\n\nPrevious code:\n{code}\n\nQA feedback:\n{feedback}\n\nRUN RESULT of previous code:\n{result}" if feedback else ""
+            code = say("DEV", f"Original request (authoritative, follow it exactly):\n{task}\n\nSpec:\n{spec}"
+                              f"\n\nDepartment notes (follow the change plan and security rules):{notes}{redo}")
+            cur = runnable(code)
+            if cur and cur in seen:  # DEV resent identical code: escalate once, then give up
+                if hard:
+                    emit(note="DEV ส่งโค้ดเดิมซ้ำ หยุดวนรอบ")
+                    break
+                hard = True
+                emit(note="DEV ส่งโค้ดเดิมซ้ำ → เปลี่ยนเป็นโมเดลใหญ่")
+            seen.add(cur)
+            result, run_ok = run_code(cur)
+            if result:
+                emit(note="ผลรันโค้ด: " + result.replace("\n", " ")[:160])
+            feedback = say("QA", f"Original request (authoritative):\n{task}\n\nSpec:\n{spec}\n\nCode:\n{code}"
+                           + (f"\n\nACTUAL RUN RESULT (trust this over guessing):\n{result}" if result else ""))
+            ok = passed(feedback) and run_ok  # a failing run overrides QA's PASS
+            if passed(feedback) and not run_ok:
+                emit(note="QA ให้ PASS แต่รันไม่ผ่าน → ตีกลับอัตโนมัติ")
+                feedback += "\nSYSTEM: tests failed, verdict overridden to FAIL."
+            if ok:
+                break
+        emit(note="ไม่ได้เลือกโฟลเดอร์งาน: โค้ดแสดงอย่างเดียว ไม่เขียนไฟล์")
     say("BOSS", f"สรุปผลให้ลูกค้า ผลตรวจ: {'ผ่าน' if ok else f'ไม่ผ่านหลัง {rnd + 1} รอบ'}\nQA:\n{feedback}\nCode:\n{code}", phase="report")
     emit(done=ok)
 
@@ -573,6 +577,13 @@ class H(BaseHTTPRequestHandler):
                 return self.reply(200, {"ok": True})
             if self.path == "/provider/test":
                 return self.reply(200, {"reply": test_provider(body)})
+            if self.path == "/undo":
+                run, files = undo_last(WS)
+                return self.reply(200, {"run": run, "files": files})
+            if self.path == "/settings":
+                CFG["test_cmd"] = (body.get("test_cmd") or "").strip()
+                save_settings()
+                return self.reply(200, {"ok": True})
             if self.path == "/stop":
                 CANCEL.set()
                 return self.reply(200, {"ok": True})

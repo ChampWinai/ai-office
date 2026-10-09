@@ -23,27 +23,6 @@ def test_path_as_first_body_line():
     assert fs[0]["path"] == "b.py" and fs[0]["body"] == "y = 2\n"
 
 
-def test_refuses_escape():
-    with tempfile.TemporaryDirectory() as d:
-        server.WS = Path(d)
-        try:
-            server.plan_writes("```python path=../evil.py\nx = 1\n```", "")
-        except ValueError:
-            return
-        raise AssertionError("path outside workspace was not refused")
-
-
-def test_plan_diff_apply():
-    with tempfile.TemporaryDirectory() as d:
-        server.WS = Path(d)
-        plan = server.plan_writes("```python path=ok.py\nz = 3\n```", "")
-        assert "+z = 3" in server.diff_text(plan)
-        assert server.apply_writes(plan) == ["ok.py"]
-        assert (Path(d) / "ok.py").read_text(encoding="utf-8") == "z = 3\n"
-
-
-
-
 def test_departments_and_setup_list():
     phases = {n: c["phase"] for n, c in server.ROLES.items()}
     assert phases["PLAN"] == "plan" and phases["SEC"] == "plan" and phases["DEV"] == "build" and phases["QA"] == "review"

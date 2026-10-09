@@ -167,6 +167,7 @@ dialog::backdrop{background:rgba(2,6,14,.6)}
 <div class="banner warn" id="setupBanner"><div class="bt"><span id="setupMsg"></span><div class="bar" id="setupBar"><i id="setupFill"></i></div></div><button class="btn sm" id="setupBtn">ตั้งค่าอัตโนมัติ</button></div>
 
 <div class="card" id="wsbar"><span class="lbl">📁 โฟลเดอร์งาน</span><span id="wspath">ยังไม่ได้เลือก (โค้ดแสดงอย่างเดียว ไม่เขียนไฟล์)</span><button class="btn ghost sm" id="wsbtn">เลือกโฟลเดอร์</button></div>
+<div class="card" id="cmdbar" style="display:flex;align-items:center;gap:10px;margin:8px 10px 0;padding:6px 14px"><span class="lbl" style="margin:0">🧪 คำสั่งทดสอบ</span><input id="testCmd" placeholder="เช่น python -m unittest  (เว้นว่างได้ ระบบจะเช็ก syntax อย่างเดียว)" style="flex:1;min-width:0;padding:6px 10px;background:#040b16;color:var(--txt);border:1px solid var(--line);border-radius:9px;font:12px Consolas,monospace"><button class="btn ghost sm" id="testSave">บันทึก</button><button class="btn ghost sm" id="undoBtn" title="ย้อนการเขียนไฟล์ครั้งล่าสุด">↶ ย้อนการแก้ไขล่าสุด</button></div>
 
 <main>
  <div class="col" id="team">
@@ -314,6 +315,7 @@ function handle(e){
    fetch("/decide",{method:"POST",body:JSON.stringify({ok:b.dataset.ok==="1"})})});
   log.append(d);log.scrollTop=log.scrollHeight;return}
  if(e.files)fetch("/workspace").then(r=>r.json()).then(showWs);
+ if(e.applied){log.insertAdjacentHTML("beforeend",`<div class="sep">บันทึกการแก้ไขแล้ว · <button class="btn ghost sm" onclick="undoLast(this)">↶ ย้อนกลับ</button></div>`);return}
  if(e.note){
   if(/ผลรันโค้ด/.test(e.note)){M.code++;setM()}
   log.insertAdjacentHTML("beforeend",`<div class="sep">⚙ ${esc(e.note)}</div>`);
@@ -451,11 +453,26 @@ $("pSave").onclick=async()=>{
  }catch(err){pMsg.textContent="⚠ "+err.message}};
 $("pCancel").onclick=()=>$("prov").close();
 
+/* ---------- test command & undo ---------- */
+async function undoLast(btn){
+ if(btn)btn.disabled=true;
+ const r=await fetch("/undo",{method:"POST",body:"{}"}),j=await r.json();
+ if(j.error){alert(j.error);return}
+ alert("ย้อนกลับแล้ว: "+j.files.join(", "));
+ fetch("/workspace").then(r=>r.json()).then(showWs);
+}
+$("undoBtn").onclick=()=>undoLast();
+$("testSave").onclick=async()=>{
+ const r=await fetch("/settings",{method:"POST",body:JSON.stringify({test_cmd:$("testCmd").value})});
+ $("testSave").textContent=r.ok?"บันทึกแล้ว ✔":"ผิดพลาด";setTimeout(()=>$("testSave").textContent="บันทึก",1200);
+};
+
 /* ---------- start ---------- */
 (async function init(){
  CFG=await fetch("/config").then(r=>r.json());
  $("ver").textContent="v"+CFG.version;
  buildOffice();
+ $("testCmd").value=CFG.test_cmd||"";
  showHist();
  setInterval(()=>$("clock").textContent=new Date().toTimeString().slice(0,8),1000);
  fetch("/workspace").then(r=>r.json()).then(showWs).catch(()=>{});

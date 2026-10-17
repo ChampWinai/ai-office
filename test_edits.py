@@ -37,6 +37,55 @@ def test_empty_path_block_joins_next_block_and_blank_write_is_refused():
     assert errs and "เนื้อหาว่าง" in errs[0] and (root / "A.cs").read_bytes() == b"class A { int x; }\n"
 
 
+def test_paths_small_models_write_outside_the_fence_line():
+    reopened = "```javascript\npath=src/slugify.js\n```javascript\nfunction slugify(s) {}\n```"
+    headings = "### shop/discount.py\n```python\ndef f(): pass\n```\n**app.py**:\n```python\nx = 1\n```\nFILE: `a.rs`\n```rust\nfn a() {}\n```"
+    prose = "Here is the test:\n```js\ntest()\n```"
+    assert [(o["path"], o["body"]) for o in edits.parse_ops(reopened)] == [("src/slugify.js", "function slugify(s) {}\n")]
+    for reply in ("```python\nFILE: stats.py\n```python\ndef m(): pass\n```", "```python\nFILE: stats.py\ndef m(): pass\n```",
+                  "```\nFILE: stats.py\n```python\ndef m(): pass\n```"):
+        assert [(o["path"], o["body"]) for o in edits.parse_ops(reply)] == [("stats.py", "def m(): pass\n")], reply
+    assert [o["path"] for o in edits.parse_ops(headings)] == ["shop/discount.py", "app.py", "a.rs"]
+    assert edits.parse_ops(prose) == []
+    plural = "FILES: shop/discount.py\n\n```python\n# shop/discount.py\n\ndef f(): pass\n```\n```python\n# v1.2\nx = 1\n```"
+    assert [(o["path"], o["body"]) for o in edits.parse_ops(plural)] == [("shop/discount.py", "\ndef f(): pass\n")]
+    fenced_edit = "FILE: a.py\n```python\n<<<<<<< SEARCH\nx = 1\n=======\nx = 2\n>>>>>>> REPLACE\n```"
+    assert edits.parse_ops(fenced_edit) == [{"kind": "edit", "path": "a.py", "pairs": [("x = 1", "x = 2")]}]
+
+
+def test_fragment_is_spliced_into_the_file():
+    big = "import os\n\n\n" + "".join(f"def f{i}():\n    return {i}\n\n\n" for i in range(10)) + "MAX = 5\n"
+    root = _ws({"big.py": big.encode(), "prod.py": b"TIMEOUT = 30\nDEBUG = False\n",
+                "lib.rs": b"pub fn a() -> u32 {\n    1\n}\n\npub fn b() -> u32 {\n    2\n}\n\npub fn c() -> u32 {\n    3\n}\n\npub fn d() -> u32 {\n    4\n}\n"})
+    assert not edits.apply_ops(root, [
+        {"kind": "write", "path": "big.py", "body": "import sys\n\ndef f3():\n    return sys.maxsize\n\ndef g():\n    return 0\n"},
+        {"kind": "write", "path": "prod.py", "body": "TIMEOUT = 60\n"},
+        {"kind": "write", "path": "lib.rs", "body": "pub fn b() -> u32 {\n    20\n}\n"}])
+    out = (root / "big.py").read_text()
+    assert "import os\nimport sys\n" in out and "return sys.maxsize" in out and "return 3\n" not in out
+    assert "def f9():\n    return 9" in out and out.rstrip().endswith("return 0") and "MAX = 5" in out
+    assert (root / "prod.py").read_text() == "TIMEOUT = 60\nDEBUG = False\n"
+    rs = (root / "lib.rs").read_text()
+    assert "    20\n" in rs and "    2\n" not in rs and "pub fn d()" in rs
+    errs = edits.apply_ops(root, [{"kind": "write", "path": "big.py", "body": "print('hi')\n"}])
+    assert errs and "บางส่วน" in errs[0]
+
+
+def test_search_tolerates_whitespace_and_skips_already_applied():
+    root = _ws({"q.js": b"test('fifo', () => { const q = 1; });\nmodule.exports = {};\n"})
+    errs = edits.apply_ops(root, [{"kind": "edit", "path": "q.js", "pairs": [
+        ("test('fifo', () => {\n  const q = 1;\n});", "test('fifo', () => {\n  const q = 2;\n});"),
+        ("module.exports = {};", "module.exports = { q };"), ("module.exports = {};", "module.exports = { q };")]}])
+    assert not errs, errs
+    assert (root / "q.js").read_text() == "test('fifo', () => {\n  const q = 2;\n});\nmodule.exports = { q };\n"
+
+
+def test_whole_file_like():
+    old = "fn a() {\n    1\n}\n\n#[test]\nfn t() {}\n"
+    assert edits.whole_file_like(old, "fn a() {\n    2\n}\n\n#[test]\nfn t() {}\n#[test]\nfn u() {}\n")
+    assert not edits.whole_file_like(old, "test('peek', () => {});\n")
+
+
 def test_ambiguous_search_is_refused():
     root = _ws({"a.py": b"x = 1\nx = 1\n"})
     errs = edits.apply_ops(root, [{"kind": "edit", "path": "a.py", "pairs": [("x = 1\n", "x = 9\n")]}])
@@ -111,6 +160,8 @@ def test_tools_search_read_list():
     ws = _ws({"src/cleaner.py": b"def clean_temp():\n    return 1\n", "README.md": b"# hi\n"})
     files = edits.project_files(ws)
     assert "src/cleaner.py:1: def clean_temp():" in edits.run_tool(ws, files, "SEARCH", "clean_temp")
+    assert "src/cleaner.py:1:" in edits.run_tool(ws, files, "SEARCH", "clean_temp src/cleaner.py")
+    assert edits.run_tool(ws, files, "SEARCH", "clean_temp README.md") == "(ไม่พบ)"
     assert "return 1" in edits.run_tool(ws, files, "READ", "src/cleaner.py:2-2")
     assert edits.run_tool(ws, files, "LIST", ".").split("\n") == ["README.md", "src/"]
     assert edits.tool_calls("SEARCH: foo\n```\nREAD: not-a-call\n```\nREAD: a.py:1-5") == [("SEARCH", "foo"), ("READ", "a.py:1-5")]

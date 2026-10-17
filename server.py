@@ -599,27 +599,29 @@ def orchestrate(task, emit, approve=False, mode="edit", attachments=None):
         try:
             for rnd in range(MAX_ROUNDS):
                 emit(round=rnd + 1)
-                redo = f"\n\nYour previous answer:\n{last}\n\nQA FEEDBACK:\n{feedback}\n\nCHECK RESULT:\n{result}" if feedback else ""
-                last = say("DEV", f"Original request (authoritative, follow it exactly):\n{task}{att_text}\n\nSpec:\n{spec}"
-                                  f"\n\nDepartment notes (follow the change plan and security rules):{notes}{memory}"
+                redo = (f"\n\nYOUR EARLIER CHANGES ARE ALREADY APPLIED (CURRENT FILES above include them). Output only what still has to change."
+                        f"\n\nYour previous answer:\n{last}\n\nQA FEEDBACK:\n{feedback}\n\nCHECK RESULT:\n{result}") if feedback else ""
+                prev = last
+                last = say("DEV", f"Original request (authoritative, follow it exactly, never do more than it asks):\n{task}{att_text}"
+                                  f"\n\nSpec (hints only):\n{spec}\n\nDepartment notes (follow the change plan and security rules):{notes}{memory}"
                                   f"{wsctx}\n\nCURRENT FILES:{bundle}{redo}", tools=2, pics=images)
+                if prev and last.strip() == prev.strip() and not hard:  # the same answer again: escalate once
+                    hard = True
+                    emit(note="DEV ตอบซ้ำเดิม → เปลี่ยนเป็นโมเดลใหญ่")
                 ops = E.parse_ops(last)
                 m = re.search(r"[\w\-./]+\.\w+", task)
                 hit = next((f for f in files if f in task or Path(f).name in task), None) or (m.group(0) if m else None)
-                loose = sorted((f for f in E.fences(last) if not f["path"] and f["body"].strip()), key=lambda f: len(f["body"]), reverse=True)
-                if not ops and hit and loose:  # a bare code block (any language) for the file the request names...
-                    old = WS / hit
-                    old_lines = len(E.read_text(old)[0].splitlines()) if old.is_file() else 0
-                    if len(loose[0]["body"].splitlines()) >= 0.6 * old_lines:  # ...but only if it is the whole file, not a fragment
-                        ops = [{"kind": "write", "path": hit, "body": loose[0]["body"]}]
+                old = E.read_text(WS / hit)[0] if hit and (WS / hit).is_file() else ""
+                like = [f["body"] for f in E.fences(last) if not f["path"] and E.whole_file_like(old, f["body"])]
+                if not ops and len(like) == 1:  # one bare code block (any language) that is clearly the named file, rewritten
+                    ops = [{"kind": "write", "path": hit, "body": like[0]}]
                 cmds = [o["cmd"] for o in ops if o["kind"] == "run"]
                 new_cmds = [c for c in cmds if c not in allowed_cmds and c not in denied_cmds]
                 if new_cmds:  # every shell command is the user's call, even outside approve mode
                     emit(confirm_run=new_cmds)
                     (allowed_cmds if wait_decision() else denied_cmds).update(new_cmds)
-                if root:
-                    shutil.rmtree(root, ignore_errors=True)
-                root, copied = E.stage(WS, files)
+                if not root:  # later rounds build on the previous round's copy instead of starting over
+                    root, copied = E.stage(WS, files)
                 errs = E.apply_ops(root, ops)
                 run_out = E.run_cmds(root, [c for c in cmds if c in allowed_cmds])
                 denied = [c for c in cmds if c in denied_cmds]
@@ -642,7 +644,17 @@ def orchestrate(task, emit, approve=False, mode="edit", attachments=None):
                 diff = E.diff_for(WS, root, changed, deleted) if (changed or deleted) else ""
                 if diff:
                     emit(note=f"diff รอบที่ {rnd + 1} (ยังไม่เขียนจริง)", diff=diff)
-                feedback = say("QA", f"Original request (authoritative):\n{task}\n\nSpec:\n{spec}\n\nDIFF:\n{diff}\n\nCHECK RESULT:\n{result}")
+                bundle = E.file_bundle(root, list(dict.fromkeys(picked + changed)))
+                if not diff:  # nothing to review: the errors are the feedback (QA would only imagine a diff here)
+                    feedback = "VERDICT: FAIL\nNo file changed yet."
+                    continue
+                review = f"Original request (the ONLY requirements, judge nothing else):\n{task}\n\nDIFF:\n{diff}\n\nCHECK RESULT:\n{result}"
+                feedback = say("QA", review)
+                big = ROLES["QA"].get("hard_model") or ROLES["QA"]["model"]
+                if not passed(feedback) and checks_ok and not errs and not hard and big != ROLES["QA"]["model"] and provider()["type"] == "ollama":
+                    emit(note="QA ให้ FAIL แต่การตรวจผ่าน → ขอความเห็นที่สองจากโมเดลใหญ่")  # small reviewers often fail correct work
+                    hard = True
+                    feedback = say("QA", review)
                 ok = passed(feedback) and checks_ok and not errs and bool(changed or deleted)
                 if passed(feedback) and not ok:
                     emit(note="QA ให้ PASS แต่การตรวจไม่ผ่าน → ตีกลับอัตโนมัติ")

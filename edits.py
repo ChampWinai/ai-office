@@ -118,6 +118,9 @@ def tool_calls(reply):
 def run_tool(ws, files, kind, arg, max_lines=400):
     arg = arg.strip().strip("`")
     if kind == "SEARCH":
+        word, _, where = arg.rpartition(" ")  # "SEARCH: name path/or/folder" = search only there
+        if word.strip() and any(f == where or f.startswith(where.rstrip("/") + "/") for f in files):
+            arg, files = word.strip(), [f for f in files if f == where or f.startswith(where.rstrip("/") + "/")]
         try:
             rx = re.compile(arg, re.I)
         except re.error:
@@ -152,15 +155,46 @@ def run_tool(ws, files, kind, arg, max_lines=400):
 
 # ---------- edits ----------
 
+PATHLINE = re.compile(r"^[ \t>#*\-]*(?:(?:FILES?|Files?|files?|path|Path)\s*[:=]\s*)?[`*\"']*([\w.\-/\\]+\.\w+)[`*\"']*[ \t]*:?[ \t]*$")
+
+
+def _reopened(text):
+    """'```js' / 'FILE: a.js' (or path=a.js) / '```js' then code: the path got its own fence line and the next one re-opens
+    the block (a fence with a language never closes one). Rewritten to '```js path=a.js'."""
+    lines, out, inside, i = text.split("\n"), [], False, 0
+    while i < len(lines):
+        ln = lines[i].strip()
+        if ln.startswith("```"):
+            pm = i + 2 < len(lines) and not inside and re.match(r"\s*(?:#|//)?\s*(?:path=|FILE:\s*)`?([^\s`]+)`?\s*$", lines[i + 1])
+            if pm and re.match(r"\s*```\w+\s*$", lines[i + 2]):
+                out.append(f"```{ln[3:].strip() or lines[i + 2].strip()[3:]} path={pm.group(1)}")
+                inside, i = True, i + 3
+                continue
+            inside = not inside
+        out.append(lines[i])
+        i += 1
+    return "\n".join(out)
+
+
 def fences(text):
-    """Code fences as dicts: lang, path (from 'path=...' on the fence line, or None), body."""
-    out = []
-    for info, body in FENCE.findall(text):
+    """Code fences as dicts: lang, path, body. The path comes from 'path=...' on the fence line, the first body line,
+    or a line right above the fence that is only a file name (e.g. 'FILE: a.py', '### a.py', '**a.py**:')."""
+    text = _reopened(text)
+    out, prev = [], 0
+    for f in FENCE.finditer(text):
+        info, body = f.group(1), f.group(2)
+        above = [ln for ln in text[prev:f.start()].split("\n") if ln.strip()]
+        prev = f.end()
         m = re.search(r"path=(\S+)", info)
         if not m:  # small models sometimes put it as the first line of the body instead
-            m = re.match(r"\s*(?:#\s*)?path=(\S+)[^\n]*\n", body)
+            m = (re.match(r"\s*(?:#|//)?\s*(?:path=|FILE:[ \t]*)`?([^\s`]+)`?[^\n]*\n", body)
+                 or re.match(r"\s*(?:#|//)[ \t]*([\w.\-/]*[\w\-]\.[A-Za-z]\w{0,4})[ \t]*\n", body))  # "# shop/cart.py"
             body = body[m.end():] if m else body
-        out.append({"lang": (info.split() or [""])[0].lower(), "path": m.group(1).strip("\"'`") if m else None, "body": body})
+        if not m and above:
+            m = PATHLINE.match(above[-1])
+        if "<<<<<<< SEARCH" in body:  # search/replace inside a fence is an edit, never a whole file
+            m = None
+        out.append({"lang": (info.split() or [""])[0].lower(), "path": m.group(1).strip("\"'`").replace("\\", "/") if m else None, "body": body})
     for i, f in enumerate(out[:-1]):  # an empty block holding only "path=x" followed by the code in its own block
         if f["path"] and not f["body"].strip() and not out[i + 1]["path"]:
             out[i + 1]["path"], f["path"] = f["path"], None
@@ -170,7 +204,7 @@ def fences(text):
 def parse_ops(reply):
     """Changes in a reply: write / edit / delete / rename / run."""
     ops = [{"kind": "write", "path": f["path"], "body": f["body"]} for f in fences(reply) if f["path"]]
-    found = EDIT.findall(reply)
+    found = EDIT.findall(re.sub(r"(FILE:[^\n]*\n)[ \t]*```[^\n]*\n(?=<<<<<<< SEARCH)", r"\1", reply))  # FILE line, then a fence
     for path in dict.fromkeys(p.strip() for p, _, _ in found):  # one op per file, in the order they appear
         ops.append({"kind": "edit", "path": path, "pairs": [(s, r) for p, s, r in found if p.strip() == path]})
     for kind, arg in CMD.findall(EDIT.sub("", FENCE.sub("", reply))):
@@ -184,6 +218,93 @@ def parse_ops(reply):
         else:
             ops.append({"kind": "run", "cmd": arg})
     return ops
+
+
+def loose_find(text, s):
+    """(start, end) of the whole lines of text that equal s when all whitespace is ignored, if exactly one place does."""
+    idx = [i for i, c in enumerate(text) if not c.isspace()]
+    norm, ns = "".join(text[i] for i in idx), "".join(s.split())
+    if not ns or norm.count(ns) != 1:
+        return None
+    k = norm.find(ns)
+    a, b = idx[k], idx[k + len(ns) - 1] + 1
+    ls, le = text.rfind("\n", 0, a) + 1, (text.find("\n", b) + 1 or len(text) + 1) - 1
+    return (ls if not text[ls:a].strip() else a), (le if not text[b:le].strip() else b)
+
+
+HEAD = re.compile(r"^(?:(?:export|pub(?:\([\w:]+\))?|async|static|public|private|protected|default|unsafe)\s+)*"
+                  r"(?:def|class|function|fn|func|struct|enum|impl|interface|trait|type|const|let|var|mod|namespace|module)\s+(?:\([^)]*\)\s*)?(\w+)|^(\w+)\s*(?::[^=\n]*)?=(?!=)")
+IMPORT = re.compile(r"^\s*(?:import|from|using|use|#include|require|package)\b|^\s*(?:const|let|var)\s+.*=\s*require\(")
+
+
+def units(lines):
+    """Top-level definitions (functions, classes, constants...) as {name: (start, end)} line ranges, any language."""
+    out, i = {}, 0
+    while i < len(lines):
+        m = HEAD.match(lines[i])
+        if not m:
+            i += 1
+            continue
+        start, end = i, _extent(lines, i)
+        while start and lines[start - 1].startswith(("@", "#[")):  # decorators / attributes belong to the definition below
+            start -= 1
+        out.setdefault(m.group(1) or m.group(2), (start, end))
+        i = end
+    return out
+
+
+def _extent(lines, i):
+    """Index after the definition starting at line i: indentation for Python blocks, bracket balance otherwise."""
+    depth, j = 0, i
+    while j < len(lines):
+        depth += sum(lines[j].count(c) for c in "([{") - sum(lines[j].count(c) for c in ")]}")
+        j += 1
+        if depth > 0:
+            continue
+        if lines[j - 1].rstrip().endswith(":") and re.match(r"(?:async\s+)?(?:def|class)\b", lines[i]):  # Python block
+            while j < len(lines) and (not lines[j].strip() or lines[j][:1].isspace()):
+                j += 1
+            while j > i + 1 and not lines[j - 1].strip():
+                j -= 1
+            return j
+        nxt = next((ln for ln in lines[j:] if ln.strip()), "")
+        if not nxt.lstrip().startswith("{"):  # not an Allman-style "{" on the next line
+            return j
+    return j
+
+
+def is_fragment(old, new):
+    """New content that leaves out some of the old file's top-level definitions and is much shorter: a fragment.
+    ponytail: a real request to delete most of a file looks the same; DEV then has to use SEARCH/REPLACE or DELETE."""
+    ol, nl = [x for x in old.split("\n") if x.strip()], [x for x in new.split("\n") if x.strip()]
+    return bool(ol) and len(nl) < 0.6 * len(ol) and bool(set(units(old.split("\n"))) - set(units(new.split("\n"))))
+
+
+def splice(old, frag):
+    """Put the definitions of frag into old: replace those with the same name, append new ones, add missing imports.
+    None if frag has text that is neither a definition, an import, nor already in old."""
+    ol, fl = old.split("\n"), frag.strip("\n").split("\n")
+    fu, ou = units(fl), units(ol)
+    if not fu:
+        return None
+    inside = {k for a, b in fu.values() for k in range(a, b)}
+    have = {x.strip() for x in ol}
+    loose = [x for k, x in enumerate(fl) if k not in inside and x.strip() and x.strip() not in have]
+    if any(not IMPORT.match(x) for x in loose):
+        return None
+    for name, (a, b) in sorted(((n, ou[n]) for n in fu if n in ou), key=lambda u: -u[1][0]):
+        ol[a:b] = fl[fu[name][0]:fu[name][1]]
+    for name in [n for n in fu if n not in ou]:
+        ol += [""] * (2 if ol[-1].strip() else 1) + fl[fu[name][0]:fu[name][1]] + [""]
+    last_import = max((k for k, x in enumerate(ol) if IMPORT.match(x)), default=-1)
+    ol[last_import + 1:last_import + 1] = loose
+    return "\n".join(ol)
+
+
+def whole_file_like(old, body):
+    """A code block without a path counts as the new version of old only if it keeps most of old's lines."""
+    ol = {x.strip() for x in old.split("\n") if x.strip()}
+    return bool(ol) and len(ol & {x.strip() for x in body.split("\n")}) >= 0.5 * len(ol)
 
 
 def apply_ops(root, ops):
@@ -209,17 +330,27 @@ def apply_ops(root, ops):
             elif op["kind"] == "write":
                 if not op["body"].strip() and t.is_file() and t.stat().st_size:
                     raise EditError(f"{op['path']}: เนื้อหาว่าง จึงไม่เขียนทับ (ถ้าต้องการลบไฟล์ให้ใช้ DELETE:)")
-                enc, nl = (read_text(t)[1:] if t.is_file() else ("utf-8", "\n"))
-                write_text(t, op["body"], enc, nl)
+                old, enc, nl = read_text(t) if t.is_file() else ("", "utf-8", "\n")
+                body = op["body"]
+                if is_fragment(old, body):  # only some functions of a bigger file: put them in place, keep the rest
+                    body = splice(old, body)
+                    if body is None:
+                        raise EditError(f"{op['path']}: ส่งมาแค่บางส่วนของไฟล์ ให้ส่งทั้งไฟล์ หรือใช้ FILE + SEARCH/REPLACE")
+                write_text(t, body, enc, nl)
             else:
                 if not t.is_file():
                     raise EditError(f"{op['path']}: ไม่มีไฟล์นี้ (ถ้าต้องการสร้างใหม่ ใช้ block เต็มไฟล์ path=...)")
                 text, enc, nl = read_text(t)
                 for s, r in op["pairs"]:
                     n = text.count(s)
-                    if n != 1:
+                    if n == 1:
+                        text = text.replace(s, r, 1)
+                    elif n == 0 and r.strip() and text.count(r) == 1:
+                        continue  # already applied in an earlier round
+                    elif n == 0 and (span := loose_find(text, s)):
+                        text = text[:span[0]] + r.strip("\n") + text[span[1]:]
+                    else:
                         raise EditError(f"{op['path']}: ข้อความ SEARCH พบ {n} ครั้ง (ต้องพบพอดี 1 ครั้ง) ให้คัดลอกข้อความจากไฟล์ให้ตรงทุกตัวอักษร")
-                    text = text.replace(s, r, 1)
                 write_text(t, text, enc, nl)
         except (EditError, OSError) as e:
             errors.append(str(e))
